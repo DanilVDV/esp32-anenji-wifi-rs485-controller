@@ -57,6 +57,43 @@
 
 ## Аппаратная схема
 
+### Используемые модули (пример)
+
+Ниже приведены **типовые модули**, которые удобно использовать с этой прошивкой. Внешний вид, разводка и маркировка у продавцов могут отличаться, поэтому перед подключением обязательно сверяйте распиновку именно вашего экземпляра.
+
+<table>
+  <tr>
+    <td align="center" width="33%"><b>ESP32 DevKit / ESP32-WROOM-32</b><br><img src="docs/media/module-esp32-devkit.webp" alt="ESP32 DevKit and expansion board" width="260"><br><sub>Основной контроллер проекта. На фото — типичный ESP32 DevKit с платой расширения.</sub></td>
+    <td align="center" width="33%"><b>TTL ↔ RS-485 (MAX485)</b><br><img src="docs/media/module-max485.webp" alt="MAX485 TTL RS485 converter" width="260"><br><sub>Преобразователь UART ↔ RS-485 для связи ESP32 с инвертором по Modbus RTU.</sub></td>
+    <td align="center" width="33%"><b>RTC + EEPROM (Tiny RTC / AT24C32)</b><br><img src="docs/media/module-tiny-rtc-at24c32.webp" alt="Tiny RTC I2C module with AT24C32" width="260"><br><sub>Типичный I²C-модуль RTC с резервной батарейкой; в проекте также используется AT24C32 для хранения статистики.</sub></td>
+  </tr>
+</table>
+
+> Если у вас другая плата ESP32, другой RS‑485-трансивер или иной RTC-модуль — это обычно допустимо, если сохраняются логические уровни, интерфейсы и совместимая распиновка.
+
+### Что понадобится / BOM
+
+| Компонент | Кол-во | Обязателен | Назначение / примечание |
+|---|---:|:---:|---|
+| ESP32 DevKit / ESP32-WROOM-32 | 1 | ✅ | Основной контроллер, Wi‑Fi и Web UI |
+| TTL ↔ RS‑485 transceiver | 1 | ✅ | UART2 ↔ Modbus RTU; на фото показан типовой MAX485-модуль |
+| RTC DS1307/DS3231-compatible | 1 | ◻️ | Часы реального времени для планировщика |
+| AT24C32 | 1 | ◻️ | Persistent battery/tariff statistics и wear-levelled history |
+| Tiny RTC board с AT24C32 | 1 | ◻️ | Удобный вариант, объединяющий RTC и EEPROM на одной I²C-плате |
+| PZEM‑016 | 1 | ◻️ | Дополнительный измеритель на общей RS‑485-шине |
+| Провода / клеммы / витая пара для A/B | по месту | ✅ | Соединение модулей и линии RS‑485 |
+| USB-кабель для ESP32 | 1 | ✅ | Первичная прошивка и Serial Monitor |
+
+> **Важно для MAX485:** у разных готовых модулей питание и TTL-уровни могут отличаться. Перед подключением `RO/DI/DE/RE` к ESP32 убедитесь по схеме именно вашей платы, что её логические уровни совместимы с 3,3 В ESP32.
+
+### Схема подключения с фото-подсказками
+
+<p align="center">
+  <img src="docs/media/wiring-modules.png" alt="ESP32 MAX485 RTC AT24C32 ANENJI wiring overview" width="100%">
+</p>
+
+Ключевые соединения на схеме соответствуют прошивке: `GPIO17 → DI`, `RO → GPIO16`, `GPIO4 → DE + /RE`, `GPIO21 → SDA`, `GPIO22 → SCL`. Линия `A/B` идёт к ANENJI и при необходимости используется совместно с PZEM‑016.
+
 ### ESP32 ↔ RS‑485 трансивер
 
 | ESP32 | RS‑485 модуль | Назначение |
@@ -260,7 +297,11 @@ X-ANENJI-Admin: <admin-password>
 │   │   ├── battery-stats.png
 │   │   ├── rtc-scheduler.png
 │   │   ├── network-modbus.png
-│   │   └── service-pzem-ota.png
+│   │   ├── service-pzem-ota.png
+│   │   ├── module-esp32-devkit.webp
+│   │   ├── module-max485.webp
+│   │   ├── module-tiny-rtc-at24c32.webp
+│   │   └── wiring-modules.png
 │   ├── api.md
 │   ├── architecture.md
 │   ├── registers.md
