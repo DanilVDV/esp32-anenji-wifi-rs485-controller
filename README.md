@@ -6,6 +6,37 @@
 
 > Проект подготовлен из рабочего монолитного Arduino-скетча. Регистры, GPIO, таймауты и функции ниже описаны по исходному коду. Электрические характеристики конкретного RS‑485-трансивера и модулей питания в исходнике не заданы — сверяйте их с документацией вашей платы.
 
+
+## Демонстрация Web UI
+
+Короткое превью интерфейса:
+
+<p align="center">
+  <img src="docs/media/demo.gif" alt="ESP32 ANENJI Web UI demo" width="480">
+</p>
+
+<p align="center">
+  <a href="docs/media/demo.mp4">▶ Открыть полное видео (около 44 секунд)</a>
+</p>
+
+### Скриншоты
+
+<table>
+  <tr>
+    <td align="center"><b>Обзор / энергетическая схема</b><br><img src="docs/media/dashboard.png" alt="Dashboard" width="420"></td>
+    <td align="center"><b>Статистика аккумулятора</b><br><img src="docs/media/battery-stats.png" alt="Battery statistics" width="420"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>RTC и планировщик</b><br><img src="docs/media/rtc-scheduler.png" alt="RTC scheduler" width="420"></td>
+    <td align="center"><b>Wi-Fi и Modbus / RS-485</b><br><img src="docs/media/network-modbus.png" alt="Network and Modbus settings" width="420"></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><b>PZEM-016, OTA и чтение регистров</b><br><img src="docs/media/service-pzem-ota.png" alt="PZEM OTA service page" width="420"></td>
+  </tr>
+</table>
+
+> Скриншоты сделаны с реального Web UI этой версии прошивки. Значения телеметрии на них приведены только как пример работы интерфейса.
+
 ## Возможности
 
 - Wi‑Fi STA и captive Setup AP для первичной настройки;
@@ -222,6 +253,14 @@ X-ANENJI-Admin: <admin-password>
 │   └── ANENJI_ESP32_Controller/
 │       └── ANENJI_ESP32_Controller.ino
 ├── docs/
+│   ├── media/
+│   │   ├── demo.gif
+│   │   ├── demo.mp4
+│   │   ├── dashboard.png
+│   │   ├── battery-stats.png
+│   │   ├── rtc-scheduler.png
+│   │   ├── network-modbus.png
+│   │   └── service-pzem-ota.png
 │   ├── api.md
 │   ├── architecture.md
 │   ├── registers.md

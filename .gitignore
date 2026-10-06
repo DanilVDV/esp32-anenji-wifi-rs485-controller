@@ -1,0 +1,22 @@
+# Arduino / ESP32 build artifacts
+build/
+*.bin
+*.elf
+*.map
+*.hex
+*.uf2
+
+# PlatformIO (если будет добавлен позже)
+.pio/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local secrets / dumps
+*.nvs
+*.dump
+secrets.*
+credentials.*
