@@ -1,4 +1,4 @@
-name: Promote datalogger v0.15.1 to main
+name: Promote datalogger v0.15.2 to main
 
 on:
   push:
@@ -28,8 +28,8 @@ jobs:
           path: patchsrc
           fetch-depth: 1
 
-      - name: Apply datalogger patch
-        run: python3 patchsrc/tools/apply_datalogger_v0_15_1.py base
+      - name: Apply datalogger stability patch
+        run: python3 patchsrc/tools/apply_datalogger_v0_15_2.py base
 
       - name: Validate firmware markers and UI JavaScript
         run: |
@@ -38,9 +38,26 @@ jobs:
           import re
           p=Path('base/firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
           s=p.read_text(encoding='utf-8')
-          req=['const char* FW_VERSION = "0.15.1";','DATALOGGER_UDP_PORT = 58899','DATALOGGER_TCP_PORT = 8899','set>server=','handleDataloggerInfo','par=41','par=43','par=29','/api/datalogger/info','id="dlIp"',"['Datalogger','service']"]
+          req=[
+            'const char* FW_VERSION = "0.15.2";',
+            'if (otaInProgress || otaRestartPending || dataloggerServiceMode) return;',
+            'if (setupMode || dataloggerServiceMode || wifiSsid.length() == 0)',
+            '} else if (!dataloggerServiceMode && WiFi.status() != WL_CONNECTED && wifiSsid.length()) {',
+            'dataloggerServiceMode=true; wifiDisconnectedSinceMs=0; inverterOfflineSinceMs=0;',
+            "dlReq('/api/datalogger/service-ap/start')",
+            "dlReq('/api/datalogger/restore')",
+            'handleDataloggerSetParam',
+            '/api/datalogger/info'
+          ]
           missing=[x for x in req if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
+          if 'handleDataloggerSetParam(){\n  if(!adminAuthorized())' not in s:
+            raise SystemExit('dangerous datalogger writes must remain admin-protected')
+          for fn in ['handleDataloggerServiceApStart','handleDataloggerConnect','handleDataloggerRestore']:
+            pos=s.find('void '+fn+'(){')
+            if pos<0: raise SystemExit(fn+' missing')
+            body=s[pos:s.find('\n}',pos)+2]
+            if 'adminAuthorized()' in body: raise SystemExit(fn+' still requires admin')
           m=re.search(r'<script>(.*?)</script>',s,re.S)
           if not m: raise SystemExit('embedded JS not found')
           Path('/tmp/ui.js').write_text(m.group(1),encoding='utf-8')
@@ -54,5 +71,5 @@ jobs:
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
-          git commit -m "Add experimental EyeBond datalogger service controls"
+          git commit -m "Stabilize datalogger service Wi-Fi and watchdog behavior"
           git push origin HEAD:main
