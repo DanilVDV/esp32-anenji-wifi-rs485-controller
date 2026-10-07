@@ -51,17 +51,17 @@ once("async function dlRestore(){try{dlShow(await dlReq('/api/datalogger/restore
      "async function dlRestore(){try{dlShow(await dlReq('/api/datalogger/restore'));",
      'restore js auth')
 
-# Preserve the service AP and suppress recovery logic while switching STA networks.
-once('  WiFi.mode(WIFI_AP_STA); WiFi.disconnect(false,false); delay(100); WiFi.begin(ssid.c_str(),pass.c_str());',
-     '  dataloggerServiceMode=true; wifiDisconnectedSinceMs=0; inverterOfflineSinceMs=0;\n  WiFi.mode(WIFI_AP_STA); WiFi.setAutoReconnect(false); WiFi.disconnect(false,false); delay(100); WiFi.begin(ssid.c_str(),pass.c_str());',
+# Preserve the service AP and pre-arm service mode before deliberately dropping home STA.
+once('  WiFi.mode(WIFI_AP_STA);WiFi.disconnect(false,false);delay(100);WiFi.begin(ssid.c_str(),pass.c_str());',
+     '  dataloggerServiceMode=true;wifiDisconnectedSinceMs=0;inverterOfflineSinceMs=0;\n  WiFi.mode(WIFI_AP_STA);WiFi.setAutoReconnect(false);WiFi.disconnect(false,false);delay(100);WiFi.begin(ssid.c_str(),pass.c_str());',
      'connect service mode pre-arm')
 
-once('  if(WiFi.status()!=WL_CONNECTED){sendJson(504,F("{\\"ok\\":false,\\"error\\":\\"Could not connect to datalogger AP; service AP remains active\\"}"));return;}\n  dataloggerServiceMode=true;',
-     '  if(WiFi.status()!=WL_CONNECTED){dataloggerServiceMode=false;sendJson(504,F("{\\"ok\\":false,\\"error\\":\\"Could not connect to datalogger AP; service AP remains active\\"}"));return;}\n  dataloggerServiceMode=true;',
+once('  if(WiFi.status()!=WL_CONNECTED){sendJson(504,F("{\\"ok\\":false,\\"error\\":\\"Could not connect to datalogger AP; service AP remains active\\"}"));return;}\n  dataloggerServiceMode=true;String j=',
+     '  if(WiFi.status()!=WL_CONNECTED){dataloggerServiceMode=false;sendJson(504,F("{\\"ok\\":false,\\"error\\":\\"Could not connect to datalogger AP; service AP remains active\\"}"));return;}\n  dataloggerServiceMode=true;String j=',
      'connect failure clear service mode')
 
-once('  dataloggerServiceMode=false; WiFi.disconnect(false,false); delay(100);\n  if(wifiSsid.length()) WiFi.begin(wifiSsid.c_str(),wifiPass.c_str());',
-     '  dataloggerServiceMode=false; wifiDisconnectedSinceMs=0; inverterOfflineSinceMs=0;\n  WiFi.mode(WIFI_AP_STA); WiFi.setAutoReconnect(false); WiFi.disconnect(false,false); delay(100);\n  if(wifiSsid.length()) WiFi.begin(wifiSsid.c_str(),wifiPass.c_str());',
+once('  dataloggerServiceMode=false;WiFi.disconnect(false,false);delay(100);if(wifiSsid.length())WiFi.begin(wifiSsid.c_str(),wifiPass.c_str());',
+     '  dataloggerServiceMode=false;wifiDisconnectedSinceMs=0;inverterOfflineSinceMs=0;WiFi.mode(WIFI_AP_STA);WiFi.setAutoReconnect(false);WiFi.disconnect(false,false);delay(100);if(wifiSsid.length())WiFi.begin(wifiSsid.c_str(),wifiPass.c_str());',
      'restore stability')
 
 p.write_text(s, encoding='utf-8')
