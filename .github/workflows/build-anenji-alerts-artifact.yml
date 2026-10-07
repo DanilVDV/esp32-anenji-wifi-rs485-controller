@@ -1,0 +1,29 @@
+name: Build ANENJI alerts artifact
+
+on:
+  push:
+    branches:
+      - chatgpt/anenji-alerts-v0.15.0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply v0.15.0 patch
+        run: python3 tools/apply_anenji_alerts_v0_15_0.py .
+      - name: Verify output
+        run: |
+          grep -q 'const char\* FW_VERSION = "0.15.0";' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          grep -q 'web.on("/api/events", HTTP_GET, handleEvents);' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          grep -q 'readHolding(100, 10, d' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+      - name: Upload ready INO
+        uses: actions/upload-artifact@v4
+        with:
+          name: ANENJI_ESP32_Controller_v0.15.0
+          path: firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          if-no-files-found: error
