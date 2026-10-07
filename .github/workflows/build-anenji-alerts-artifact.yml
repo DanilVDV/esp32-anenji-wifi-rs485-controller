@@ -14,14 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Make HTML anchor tolerant
+      - name: Make UI anchors tolerant
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p=Path('tools/apply_anenji_alerts_v0_15_0.py')
           s=p.read_text(encoding='utf-8')
           old="""    if old not in s:\n        raise SystemExit(f'Anchor not found: {label}')\n"""
-          new="""    if old not in s:\n        if label == 'alert html':\n            needle = '<div class=\"card\"><h2>Полная телеметрия</h2><div id=\"tele\" class=\"grid\"></div><div class=\"toolbar\" style=\"margin-top:12px\"><button onclick=\"statusLoad(true)\">Обновить сейчас</button><span id=\"age\" class=\"small\"></span></div></div>\\n'\n            if needle in s:\n                insert = new\n                prefix = '</div></div>\\n'\n                if insert.startswith(prefix):\n                    insert = insert[len(prefix):]\n                s = s.replace(needle, insert, 1)\n                return\n        raise SystemExit(f'Anchor not found: {label}')\n"""
+          new="""    if old not in s:\n        if label == 'alert html':\n            needle = '<div class=\"card\"><h2>Полная телеметрия</h2><div id=\"tele\" class=\"grid\"></div><div class=\"toolbar\" style=\"margin-top:12px\"><button onclick=\"statusLoad(true)\">Обновить сейчас</button><span id=\"age\" class=\"small\"></span></div></div>\\n'\n            if needle in s:\n                insert = new\n                prefix = '</div></div>\\n'\n                if insert.startswith(prefix): insert = insert[len(prefix):]\n                s = s.replace(needle, insert, 1)\n                return\n        if label == 'alert javascript':\n            needle = 'let autonomyAvgW=null,autonomyLastMs=0;\\n'\n            if needle in s:\n                insert = new\n                prefix = '];\\n'\n                if insert.startswith(prefix): insert = insert[len(prefix):]\n                s = s.replace(needle, insert, 1)\n                return\n        raise SystemExit(f'Anchor not found: {label}')\n"""
           if old not in s:
               raise SystemExit('repl helper anchor missing')
           p.write_text(s.replace(old,new,1),encoding='utf-8')
@@ -33,6 +33,7 @@ jobs:
           grep -q 'const char\* FW_VERSION = "0.15.0";' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
           grep -q 'web.on("/api/events", HTTP_GET, handleEvents);' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
           grep -q 'readHolding(100, 10, d' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          grep -q 'Состояние / аварии' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
       - name: Upload ready INO
         uses: actions/upload-artifact@v4
         with:
