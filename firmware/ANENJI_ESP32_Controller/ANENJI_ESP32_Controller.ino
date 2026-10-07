@@ -515,8 +515,8 @@ String dataloggerLastTarget;
 String dataloggerLastInfo;
 uint32_t dataloggerLastOkMs = 0;
 
-const char* FW_VERSION = "0.15.1";
-const char* FW_VERSION_PREVIOUS = "0.15.0";
+const char* FW_VERSION = "0.15.2";
+const char* FW_VERSION_PREVIOUS = "0.15.1";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -668,8 +668,9 @@ void recoverRs485Uart() {
 }
 
 void serviceRtuWatchdog() {
-  // Never run UART recovery/reboot logic while the synchronous OTA HTTP request owns loopTask.
-  if (otaInProgress || otaRestartPending) return;
+  // Never run UART recovery/reboot logic while OTA or datalogger service owns networking.
+  // Datalogger service must keep the temporary AP stable even if inverter RTU is offline.
+  if (otaInProgress || otaRestartPending || dataloggerServiceMode) return;
   if (setupMode || !rtuWorkerHandle) return;
   const uint32_t now = millis();
 
@@ -735,7 +736,9 @@ void serviceHeapWatchdog() {
 }
 
 void serviceWifiWatchdog() {
-  if (setupMode || wifiSsid.length() == 0) {
+  // A deliberate datalogger AP session is not a home-Wi-Fi outage.
+  // Do not reboot or advance the Wi-Fi outage timer while service mode is active.
+  if (setupMode || dataloggerServiceMode || wifiSsid.length() == 0) {
     wifiDisconnectedSinceMs = 0;
     return;
   }
@@ -3250,7 +3253,6 @@ void handleDataloggerStatus(){
 }
 
 void handleDataloggerServiceApStart(){
-  if(!adminAuthorized()){sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}"));return;}
   WiFi.mode(WIFI_AP_STA);
   if(!setupApRunning){WiFi.softAPConfig(SETUP_AP_IP,SETUP_AP_GW,SETUP_AP_MASK);setupApRunning=WiFi.softAP(setupApSsid.c_str(),setupApPassword.c_str());}
   if(!setupApRunning){sendJson(500,F("{\"ok\":false,\"error\":\"Service AP start failed\"}"));return;}
@@ -3258,18 +3260,17 @@ void handleDataloggerServiceApStart(){
 }
 
 void handleDataloggerConnect(){
-  if(!adminAuthorized()){sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}"));return;}
   if(!setupApRunning){sendJson(409,F("{\"ok\":false,\"error\":\"Start service AP first\"}"));return;}
   String body=web.arg("plain"),ssid,pass;if(!jsonFindString(body,"ssid",ssid)||!ssid.length()){sendJson(400,F("{\"ok\":false,\"error\":\"ssid required\"}"));return;}jsonFindString(body,"password",pass);
-  WiFi.mode(WIFI_AP_STA);WiFi.disconnect(false,false);delay(100);WiFi.begin(ssid.c_str(),pass.c_str());
+  dataloggerServiceMode=true;wifiDisconnectedSinceMs=0;inverterOfflineSinceMs=0;
+  WiFi.mode(WIFI_AP_STA);WiFi.setAutoReconnect(false);WiFi.disconnect(false,false);delay(100);WiFi.begin(ssid.c_str(),pass.c_str());
   uint32_t started=millis();while(WiFi.status()!=WL_CONNECTED&&(uint32_t)(millis()-started)<15000UL){feedTaskWatchdog();delay(100);}
-  if(WiFi.status()!=WL_CONNECTED){sendJson(504,F("{\"ok\":false,\"error\":\"Could not connect to datalogger AP; service AP remains active\"}"));return;}
+  if(WiFi.status()!=WL_CONNECTED){dataloggerServiceMode=false;sendJson(504,F("{\"ok\":false,\"error\":\"Could not connect to datalogger AP; service AP remains active\"}"));return;}
   dataloggerServiceMode=true;String j=F("{\"ok\":true,\"sta_ip\":\"");j+=WiFi.localIP().toString();j+=F("\",\"datalogger_ip\":\"");j+=WiFi.gatewayIP().toString();j+=F("\"}");sendJson(200,j);
 }
 
 void handleDataloggerRestore(){
-  if(!adminAuthorized()){sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}"));return;}
-  dataloggerServiceMode=false;WiFi.disconnect(false,false);delay(100);if(wifiSsid.length())WiFi.begin(wifiSsid.c_str(),wifiPass.c_str());
+  dataloggerServiceMode=false;wifiDisconnectedSinceMs=0;inverterOfflineSinceMs=0;WiFi.mode(WIFI_AP_STA);WiFi.setAutoReconnect(false);WiFi.disconnect(false,false);delay(100);if(wifiSsid.length())WiFi.begin(wifiSsid.c_str(),wifiPass.c_str());
   sendJson(202,F("{\"ok\":true,\"restoring\":true,\"note\":\"ESP32 STA is reconnecting to saved home Wi-Fi; service AP remains available during recovery\"}"));
 }
 
@@ -4400,9 +4401,9 @@ async function dlReq(path,body={},admin=false){const h={'Content-Type':'applicat
 function dlTarget(){return ($('dlIp').value||'').trim();}
 function dlShow(x){$('dlOut').textContent=JSON.stringify(x,null,2);}
 async function dlStatus(){try{const r=await fetch('/api/datalogger/status',{cache:'no-store'}),x=await r.json();$('dlStatus').textContent=`STA: ${x.sta_ssid||'—'} ${x.sta_ip||''} | gateway ${x.gateway||'—'} | service AP ${x.service_ap_running?'ON':'OFF'}`;if(x.service_mode&&x.gateway&&!dlTarget())$('dlIp').value=x.gateway;}catch(e){}}
-async function dlServiceAp(){try{const x=await dlReq('/api/datalogger/service-ap/start',{},true);dlShow(x);alert(`Подключитесь к Wi-Fi ${x.ssid}\nПароль: ${x.password}\nОткройте http://${x.ip}`);dlStatus();}catch(e){alert(e.message)}}
-async function dlConnectAp(){try{const x=await dlReq('/api/datalogger/connect',{ssid:$('dlApSsid').value,password:$('dlApPass').value},true);dlShow(x);if(x.datalogger_ip)$('dlIp').value=x.datalogger_ip;dlStatus();}catch(e){alert(e.message)}}
-async function dlRestore(){try{dlShow(await dlReq('/api/datalogger/restore',{},true));}catch(e){alert(e.message)}}
+async function dlServiceAp(){try{const x=await dlReq('/api/datalogger/service-ap/start');dlShow(x);alert(`Подключитесь к Wi-Fi ${x.ssid}\nПароль: ${x.password}\nОткройте http://${x.ip}`);dlStatus();}catch(e){alert(e.message)}}
+async function dlConnectAp(){try{const x=await dlReq('/api/datalogger/connect',{ssid:$('dlApSsid').value,password:$('dlApPass').value});dlShow(x);if(x.datalogger_ip)$('dlIp').value=x.datalogger_ip;dlStatus();}catch(e){alert(e.message)}}
+async function dlRestore(){try{dlShow(await dlReq('/api/datalogger/restore'));}catch(e){alert(e.message)}}
 async function dlInfo(){try{dlShow(await dlReq('/api/datalogger/info',{ip:dlTarget()}));}catch(e){alert(e.message)}}
 async function dlPing(){try{dlShow(await dlReq('/api/datalogger/ping',{ip:dlTarget()}));}catch(e){alert(e.message)}}
 async function dlSet(name){const v=name==='ssid'?$('dlStaSsid').value:$('dlStaPass').value;if(!confirm('Записать параметр '+name+' в datalogger?'))return;try{dlShow(await dlReq('/api/datalogger/set',{ip:dlTarget(),name:name,value:v},true));}catch(e){alert(e.message)}}
@@ -5062,7 +5063,7 @@ void loop() {
 
   if (setupMode) {
     dnsServer.processNextRequest();
-  } else if (WiFi.status() != WL_CONNECTED && wifiSsid.length()) {
+  } else if (!dataloggerServiceMode && WiFi.status() != WL_CONNECTED && wifiSsid.length()) {
     static uint32_t lastRetry = 0;
     if ((uint32_t)(millis() - lastRetry) > 10000) {
       lastRetry = millis();
