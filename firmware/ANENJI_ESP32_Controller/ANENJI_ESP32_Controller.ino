@@ -164,6 +164,47 @@ struct ProfileApplyResult {
   ProfileFailure failures[16];
 };
 
+// ---------------- inverter faults / warnings / event log ----------------
+struct InverterEvent {
+  uint32_t id;
+  uint32_t uptimeSec;
+  uint8_t type;      // 1=fault, 2=warning, 3=mode
+  uint8_t bit;       // 0..31 for masks, 255 for mode
+  uint8_t code;      // mode value for type=3
+  bool active;
+  char severity[10];
+  char message[88];
+};
+
+const uint8_t INVERTER_EVENT_CAPACITY = 48;
+InverterEvent inverterEvents[INVERTER_EVENT_CAPACITY] = {};
+uint8_t inverterEventHead = 0;
+uint8_t inverterEventCount = 0;
+uint32_t inverterEventNextId = 1;
+portMUX_TYPE inverterEventMux = portMUX_INITIALIZER_UNLOCKED;
+
+static const char* const INVERTER_FAULTS[] = {
+  "Inverter module over temperature", "DCDC module over temperature", "Battery over voltage",
+  "PV module over temperature", "Output short circuit", "Inverter over voltage", "Output overload",
+  "Bus over voltage", "Bus soft start timed out", "PV over current", "PV over voltage",
+  "Battery over current", "Inverter over current", "Bus low voltage", "Reserved fault bit 14",
+  "Inverter DC component too high", "Reserved fault bit 16", "Output current zero bias too large",
+  "Inverter current zero bias too large", "Battery current zero bias too large",
+  "PV current zero bias too large", "Inverter low voltage", "Inverter negative power protection",
+  "Parallel host lost", "Parallel synchronization signal abnormal", "Battery type incompatible",
+  "Parallel versions incompatible"
+};
+static const char* const INVERTER_WARNINGS[] = {
+  "Reserved warning bit 0", "Mains waveform abnormal", "Reserved warning bit 2", "Mains low voltage",
+  "Mains over frequency", "Mains low frequency", "PV low voltage", "Over temperature",
+  "Battery low voltage", "Battery not connected", "Overload", "Battery equalization charging",
+  "Battery undervoltage", "Output power derating", "Fan blocked", "PV energy too low to use",
+  "Parallel communication interrupted", "Single/parallel output mode inconsistent",
+  "Parallel battery voltage difference too large"
+};
+const uint8_t INVERTER_FAULT_COUNT = sizeof(INVERTER_FAULTS)/sizeof(INVERTER_FAULTS[0]);
+const uint8_t INVERTER_WARNING_COUNT = sizeof(INVERTER_WARNINGS)/sizeof(INVERTER_WARNINGS[0]);
+
 
 #pragma pack(push,1)
 // v2 layout is kept only for one-time migration from v0.12/v0.13.0.
@@ -269,6 +310,8 @@ bool eepromReadBytes(uint16_t addr, uint8_t* dst, size_t len);
 bool eepromWriteBytes(uint16_t addr, const uint8_t* src, size_t len);
 void batteryStatsSave(bool force=false);
 bool adminAuthorized();
+bool haveReg(uint16_t reg);
+void handleEvents();
 
 
 // ---------------- DEVICE / NETWORK SETTINGS ----------------
@@ -455,8 +498,8 @@ double batteryDischargeFrac_mAh = 0.0;
 HardwareSerial RS485(2);
 WebServer web(80);
 
-const char* FW_VERSION = "0.14.31";
-const char* FW_VERSION_PREVIOUS = "0.14.28";
+const char* FW_VERSION = "0.15.0";
+const char* FW_VERSION_PREVIOUS = "0.14.31";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -487,6 +530,17 @@ uint16_t telemetryRaw[40] = {0};   // 200..239
 bool telemetryValid[40] = {false};
 uint32_t telemetryUpdatedMs = 0;
 uint32_t lastPollMs = 0;
+
+uint16_t inverterDiagRaw[10] = {0}; // 100..109
+bool inverterDiagValid = false;
+uint32_t inverterDiagUpdatedMs = 0;
+uint32_t inverterFaultMask = 0;
+uint32_t inverterWarningMask = 0;
+uint32_t inverterPrevFaultMask = 0;
+uint32_t inverterPrevWarningMask = 0;
+bool inverterMasksInitialized = false;
+uint8_t inverterPrevMode = 0;
+bool inverterPrevModeValid = false;
 
 // PZEM-016 on the same RS-485 bus as ANENJI. Default PZEM address is 1;
 // ANENJI currently uses its own configurable address (38 in the present installation).
@@ -1095,12 +1149,59 @@ void servicePzemTariff(){
 }
 
 // ---------------- telemetry ----------------
+const char* inverterModeText(uint8_t mode) {
+  switch (mode) {
+    case 0: return "Power On"; case 1: return "Standby"; case 2: return "Mains";
+    case 3: return "Off-Grid"; case 4: return "Bypass"; case 5: return "Charging";
+    case 6: return "Fault"; default: return "Unknown";
+  }
+}
+
+void appendInverterEvent(uint8_t type, uint8_t bit, uint8_t code, bool active,
+                         const char* severity, const char* message) {
+  InverterEvent e = {};
+  e.id = inverterEventNextId++;
+  e.uptimeSec = millis()/1000UL;
+  e.type = type; e.bit = bit; e.code = code; e.active = active;
+  snprintf(e.severity, sizeof(e.severity), "%s", severity ? severity : "INFO");
+  snprintf(e.message, sizeof(e.message), "%s", message ? message : "");
+  portENTER_CRITICAL(&inverterEventMux);
+  inverterEvents[inverterEventHead] = e;
+  inverterEventHead = (uint8_t)((inverterEventHead + 1) % INVERTER_EVENT_CAPACITY);
+  if (inverterEventCount < INVERTER_EVENT_CAPACITY) inverterEventCount++;
+  portEXIT_CRITICAL(&inverterEventMux);
+}
+
+void processInverterMasks(uint32_t faultMask, uint32_t warningMask) {
+  if (!inverterMasksInitialized) {
+    for (uint8_t bit=0; bit<INVERTER_FAULT_COUNT; ++bit)
+      if (faultMask & (1UL<<bit)) appendInverterEvent(1,bit,0,true,"CRITICAL",INVERTER_FAULTS[bit]);
+    for (uint8_t bit=0; bit<INVERTER_WARNING_COUNT; ++bit)
+      if (warningMask & (1UL<<bit)) appendInverterEvent(2,bit,0,true,"WARNING",INVERTER_WARNINGS[bit]);
+    inverterPrevFaultMask=faultMask; inverterPrevWarningMask=warningMask; inverterMasksInitialized=true; return;
+  }
+  uint32_t fc=faultMask^inverterPrevFaultMask, wc=warningMask^inverterPrevWarningMask;
+  for (uint8_t bit=0; bit<INVERTER_FAULT_COUNT; ++bit) { uint32_t m=1UL<<bit; if(fc&m) appendInverterEvent(1,bit,0,(faultMask&m)!=0,"CRITICAL",INVERTER_FAULTS[bit]); }
+  for (uint8_t bit=0; bit<INVERTER_WARNING_COUNT; ++bit) { uint32_t m=1UL<<bit; if(wc&m) appendInverterEvent(2,bit,0,(warningMask&m)!=0,"WARNING",INVERTER_WARNINGS[bit]); }
+  inverterPrevFaultMask=faultMask; inverterPrevWarningMask=warningMask;
+}
+
+void processInverterMode() {
+  if (!haveReg(201)) return;
+  uint8_t mode=(uint8_t)telemetryRaw[1];
+  if (!inverterPrevModeValid) { inverterPrevMode=mode; inverterPrevModeValid=true; return; }
+  if (mode==inverterPrevMode) return;
+  char msg[88]; snprintf(msg,sizeof(msg),"Mode: %s -> %s",inverterModeText(inverterPrevMode),inverterModeText(mode));
+  appendInverterEvent(3,255,mode,true,mode==6?"CRITICAL":"INFO",msg);
+  inverterPrevMode=mode;
+}
+
 void pollTelemetry() {
   // Called only by the dedicated RTU worker.
   // After a setting write, avoid immediately starting background RTU traffic.
   if ((int32_t)(rtuQuietUntilMs - millis()) > 0) return;
 
-  uint16_t a[20], b[20];
+  uint16_t a[20], b[20], d[10];
   // Keep the web UI responsive when RS-485/inverter is disconnected.
   bool okA = readHolding(200, 20, a, RTU_POLL_TIMEOUT_MS);
   // If block A failed, don't burn a second timeout immediately.
@@ -1123,9 +1224,23 @@ void pollTelemetry() {
     }
   }
 
+  bool okDiag = false;
+  if (okA) {
+    delay(15);
+    okDiag = readHolding(100, 10, d, RTU_POLL_TIMEOUT_MS);
+  }
+  if (okDiag) {
+    for (int i=0;i<10;++i) inverterDiagRaw[i]=d[i];
+    inverterDiagValid=true; inverterDiagUpdatedMs=millis();
+    inverterFaultMask=((uint32_t)d[0]<<16)|d[1];
+    inverterWarningMask=((uint32_t)d[8]<<16)|d[9];
+    processInverterMasks(inverterFaultMask,inverterWarningMask);
+  }
+
   if (okA || okB) {
     telemetryUpdatedMs = millis();
     rtuConsecutivePollFailures = 0;
+    processInverterMode();
   } else {
     rtuConsecutivePollFailures++;
     if (rtuConsecutivePollFailures >= RTU_RECOVERY_AFTER_FAILED_POLLS) {
@@ -2334,10 +2449,36 @@ void handleScheduleSet() {
   sendJson(200,F("{\"ok\":true,\"saved\":true}"));
 }
 
+void appendMaskNamesJson(String& j, uint32_t mask, const char* const* names, uint8_t count) {
+  j+='['; bool first=true;
+  for(uint8_t bit=0;bit<count;++bit){
+    if(!(mask&(1UL<<bit))) continue;
+    if(!first) j+=','; first=false;
+    j+=F("{\"bit\":"); j+=bit; j+=F(",\"text\":\""); j+=jsonEscape(String(names[bit])); j+=F("\"}");
+  }
+  j+=']';
+}
+
+void handleEvents() {
+  String j; j.reserve(6000); j=F("{\"ok\":true,\"events\":[");
+  uint8_t count,head;
+  portENTER_CRITICAL(&inverterEventMux); count=inverterEventCount; head=inverterEventHead; portEXIT_CRITICAL(&inverterEventMux);
+  for(uint8_t n=0;n<count;++n){
+    uint8_t idx=(uint8_t)((head+INVERTER_EVENT_CAPACITY-1-n)%INVERTER_EVENT_CAPACITY); InverterEvent e;
+    portENTER_CRITICAL(&inverterEventMux); e=inverterEvents[idx]; portEXIT_CRITICAL(&inverterEventMux);
+    if(n)j+=','; j+=F("{\"id\":");j+=e.id; j+=F(",\"uptime_s\":");j+=e.uptimeSec;
+    j+=F(",\"type\":\"");j+=e.type==1?F("fault"):(e.type==2?F("warning"):F("mode"));j+='"';
+    j+=F(",\"severity\":\"");j+=e.severity;j+='"'; j+=F(",\"bit\":");if(e.bit==255)j+=F("null");else j+=e.bit;
+    j+=F(",\"code\":");j+=e.code; j+=F(",\"active\":");j+=e.active?F("true"):F("false");
+    j+=F(",\"message\":\"");j+=jsonEscape(String(e.message));j+=F("\"}");
+  }
+  j+=F("]}"); sendJson(200,j);
+}
+
 // ---------------- HTTP API ----------------
 void sendJsonStatus() {
   String j;
-  j.reserve(4200);
+  j.reserve(6500);
 
   j += F("{\"ok\":true");
   j += F(",\"firmware_version\":\""); j += FW_VERSION; j += '\"';
@@ -2386,6 +2527,15 @@ void sendJsonStatus() {
   j += F(",\"last_error\":\""); j += jsonEscape(String(lastErrorPublic)); j += '"';
   j += F(",\"age_ms\":"); j += telemetryUpdatedMs ? millis() - telemetryUpdatedMs : 0;
   j += F(",\"active_profile\":\""); j += jsonEscape(activeProfile); j += '"';
+  j += F(",\"alerts\":{\"valid\":"); j += inverterDiagValid?F("true"):F("false");
+  j += F(",\"age_ms\":"); if(inverterDiagUpdatedMs) j+=(uint32_t)(millis()-inverterDiagUpdatedMs); else j+=F("null");
+  j += F(",\"fault_raw\":"); j += inverterFaultMask;
+  j += F(",\"warning_raw\":"); j += inverterWarningMask;
+  j += F(",\"operation_mode\":"); if(haveReg(201)) j+=telemetryRaw[1]; else j+=F("null");
+  j += F(",\"operation_mode_text\":\""); j += haveReg(201)?inverterModeText((uint8_t)telemetryRaw[1]):"Unknown"; j += '"';
+  j += F(",\"faults\":"); appendMaskNamesJson(j,inverterFaultMask,INVERTER_FAULTS,INVERTER_FAULT_COUNT);
+  j += F(",\"warnings\":"); appendMaskNamesJson(j,inverterWarningMask,INVERTER_WARNINGS,INVERTER_WARNING_COUNT);
+  j += F(",\"event_count\":"); j += inverterEventCount; j += '}';
   j += F(",\"pzem\":{\"enabled\":"); j += pzemEnabled?F("true"):F("false");
   j += F(",\"online\":"); j += pzemOnline?F("true"):F("false");
   j += F(",\"address\":"); j += pzemSlave;
@@ -3354,6 +3504,11 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;font-size:12px;font-weight:700}
 .badge::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
 .badge.online{color:#86efac;background:#14532d55}.badge.offline{color:#fca5a5;background:#7f1d1d55}.badge.setup{color:#fde68a;background:#78350f55}
+.alert-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:9px;margin-bottom:10px}
+.alert-box{background:#111827;border:1px solid #374151;border-radius:10px;padding:10px}.alert-box small{display:block;color:#9ca3af}.alert-box b{font-size:20px}
+.alert-box.warning{border-color:#a16207;background:#42200655}.alert-box.critical{border-color:#b91c1c;background:#450a0a66}
+.alert-list{display:grid;gap:7px}.alert-row{padding:8px 10px;border-radius:8px;background:#111827;border-left:4px solid #6b7280}
+.alert-row.warning{border-left-color:#f59e0b}.alert-row.critical{border-left-color:#ef4444}.alert-row.clear{opacity:.62}.alert-row small{display:block;color:#9ca3af;margin-top:2px}
 .info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:9px}.info-box{background:#111827;border-radius:10px;padding:11px}.info-box h3{margin:0 0 7px;font-size:15px}
 .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px dashed #374151}.kv:last-child{border-bottom:0}
 .netgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px}.netgrid label{display:flex;flex-direction:column;gap:4px}
@@ -3388,13 +3543,15 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 </div>
 <div id="tabHost"></div>
 
-<div class="card"><h2>Связь</h2>
-<div class="toolbar" style="margin-bottom:10px">
-  <span id="wifiBadge" class="badge offline">Wi‑Fi OFFLINE</span>
-  <span id="invBadge" class="badge offline">Инвертор OFFLINE</span>
-</div>
-<div id="diag"></div>
-<details style="margin-top:8px"><summary>Расширенная диагностика</summary><div id="diagExtra" class="small" style="margin-top:8px"></div></details>
+
+<div class="card"><h2>Состояние / аварии</h2>
+ <div class="toolbar" style="margin-bottom:10px">
+  <span id="stateWifiBadge" class="badge offline">Wi‑Fi OFFLINE</span>
+  <span id="stateInvBadge" class="badge offline">Инвертор OFFLINE</span>
+ </div>
+ <div class="alert-summary"><div class="alert-box"><small>Режим</small><b id="alertMode">—</b></div><div class="alert-box critical"><small>Активные аварии</small><b id="alertFaultCount">0</b></div><div class="alert-box warning"><small>Активные предупреждения</small><b id="alertWarningCount">0</b></div></div>
+ <div id="activeAlerts" class="alert-list"><div class="small">Нет активных аварий.</div></div>
+ <details style="margin-top:10px"><summary>Журнал событий</summary><div id="eventLog" class="alert-list" style="margin-top:8px"><div class="small">—</div></div></details>
 </div>
 
 <div class="card"><h2>Энергопотоки</h2>
@@ -3533,6 +3690,15 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 <div class="small" style="margin-top:8px">Требуется пароль администратора. Не отключайте питание во время записи. Настройки NVS и статистика AT24C32 при обычном OTA сохраняются.</div>
 </div>
 
+<div class="card"><h2>Связь</h2>
+<div class="toolbar" style="margin-bottom:10px">
+  <span id="wifiBadge" class="badge offline">Wi‑Fi OFFLINE</span>
+  <span id="invBadge" class="badge offline">Инвертор OFFLINE</span>
+</div>
+<div id="diag"></div>
+<details style="margin-top:8px"><summary>Расширенная диагностика</summary><div id="diagExtra" class="small" style="margin-top:8px"></div></details>
+</div>
+
 <div class="card"><h2>Чтение регистров</h2>
 <div class="toolbar"><input id="rawAddr" value="215" size="8"><input id="rawCount" value="1" size="5"><button onclick="rawRead()">Прочитать</button></div>
 <pre id="rawOut"></pre></div>
@@ -3660,6 +3826,18 @@ const teleDefs=[
  ['inverter_charge_current','Inverter charge current',233,'A',1],['pv_charge_current','PV charge current',234,'A',1]
 ];
 
+let lastEventLoadMs=0;
+function renderAlerts(x){
+ const a=x.alerts||{},faults=Array.isArray(a.faults)?a.faults:[],warnings=Array.isArray(a.warnings)?a.warnings:[];
+ if($('alertMode'))$('alertMode').textContent=a.operation_mode_text||'—';
+ if($('alertFaultCount'))$('alertFaultCount').textContent=String(faults.length);
+ if($('alertWarningCount'))$('alertWarningCount').textContent=String(warnings.length);
+ if($('activeAlerts')){const rows=[];faults.forEach(v=>rows.push(`<div class="alert-row critical"><b>FAULT · bit ${v.bit}</b><small>${v.text}</small></div>`));warnings.forEach(v=>rows.push(`<div class="alert-row warning"><b>WARNING · bit ${v.bit}</b><small>${v.text}</small></div>`));$('activeAlerts').innerHTML=rows.length?rows.join(''):'<div class="small ok">Активных аварий и предупреждений нет.</div>';}
+}
+async function eventsLoad(force=false){
+ const now=Date.now();if(!force&&now-lastEventLoadMs<9000)return;lastEventLoadMs=now;
+ try{const x=await api('/api/events',{timeoutMs:2200}),ev=Array.isArray(x.events)?x.events:[];if(!$('eventLog'))return;$('eventLog').innerHTML=ev.length?ev.slice(0,24).map(e=>{const cls=e.severity==='CRITICAL'?'critical':(e.severity==='WARNING'?'warning':'');const state=e.type==='mode'?'':(e.active?'RAISED':'CLEARED');return `<div class="alert-row ${cls} ${e.active?'':'clear'}"><b>${e.severity} · ${e.type.toUpperCase()} ${state}</b><small>${e.message} · uptime ${e.uptime_s}s</small></div>`}).join(''):'<div class="small">Событий пока нет.</div>';}catch(e){}
+}
 let autonomyAvgW=null,autonomyLastMs=0;
 
 function formatRuntime(hours){
@@ -3792,13 +3970,18 @@ async function statusLoad(force=false){
  try{
   const x=await api(force?'/api/refresh':'/api/status'),t=x.telemetry||{};window.lastStatusPacket=x;writeEnabled=!!x.write_enabled;activeProfile=x.active_profile||activeProfile;
   $('tele').innerHTML=teleDefs.map(d=>`<div class=metric><small>${teleLabel(d[0],d[1])} · ${d[2]}</small><b>${f(t[d[0]],d[4])} ${d[3]}</b></div>`).join('');
+  renderAlerts(x); eventsLoad(force);
   const pz=x.pzem||{}; window.lastPzem=pz; if($('pzV')){ $('pzV').textContent=pz.online?f(pz.voltage,1)+' V':'— V'; $('pzA').textContent=pz.online?f(pz.current,3)+' A':'— A'; $('pzW').textContent=pz.online?f(pz.power,1)+' W':'— W'; $('pzKwh').textContent=pz.online?f(pz.energy_kwh,3)+' kWh':'— kWh'; $('pzHz').textContent=pz.online?f(pz.frequency,1)+' Hz':'— Hz'; $('pzPf').textContent=pz.online?f(pz.pf,2):'—'; $('pzemEnabled').checked=!!pz.enabled; $('pzemAddr').value=pz.address||1; $('pzemState').textContent=pz.enabled?(pz.online?('ONLINE · '+pz.age_ms+' ms'):'OFFLINE'):'выключен'; if(document.activeElement!==$('pzemT1'))$('pzemT1').value=Number(pz.t1_kwh||0).toFixed(3); if(document.activeElement!==$('pzemT2'))$('pzemT2').value=Number(pz.t2_kwh||0).toFixed(3); }
   if($('infoPzem')) $('infoPzem').innerHTML=kv('Мощность всего ввода',pz.online?f(pz.power,0)+' W':'—')+kv('Напряжение',pz.online?f(pz.voltage,1)+' V':'—')+kv('Ток',pz.online?f(pz.current,3)+' A':'—')+kv('Частота',pz.online?f(pz.frequency,1)+' Hz':'—')+kv('PF',pz.online?f(pz.pf,2):'—')+kv('PZEM энергия',pz.online?f(pz.energy_kwh,3)+' kWh':'—')+kv('T1 · 07–23',f(pz.t1_kwh,3)+' kWh')+kv('T2 · 23–07',f(pz.t2_kwh,3)+' kWh')+kv('Текущий тариф',pz.tariff===1?'T1':(pz.tariff===2?'T2':'—'));
-  const wb=$('wifiBadge'),ib=$('invBadge');
-  wb.className='badge '+(x.wifi_online?'online':'offline');
-  wb.textContent=x.wifi_online?'Wi‑Fi ONLINE':'Wi‑Fi OFFLINE';
-  ib.className='badge '+(x.inverter_online?'online':'offline');
-  ib.textContent=x.inverter_online?(currentLang==='ru'?'Инвертор ONLINE':'Inverter ONLINE'):(currentLang==='ru'?'Инвертор OFFLINE':'Inverter OFFLINE');
+  const wb=$('wifiBadge'),ib=$('invBadge'),swb=$('stateWifiBadge'),sib=$('stateInvBadge');
+  const wifiClass='badge '+(x.wifi_online?'online':'offline');
+  const wifiText=x.wifi_online?'Wi‑Fi ONLINE':'Wi‑Fi OFFLINE';
+  const invClass='badge '+(x.inverter_online?'online':'offline');
+  const invText=x.inverter_online?(currentLang==='ru'?'Инвертор ONLINE':'Inverter ONLINE'):(currentLang==='ru'?'Инвертор OFFLINE':'Inverter OFFLINE');
+  if(wb){wb.className=wifiClass;wb.textContent=wifiText;}
+  if(swb){swb.className=wifiClass;swb.textContent=wifiText;}
+  if(ib){ib.className=invClass;ib.textContent=invText;}
+  if(sib){sib.className=invClass;sib.textContent=invText;}
   $('energyFlow').className='flow'+(x.inverter_online?'':' offline');
   const lastOk=x.last_ok_age_ms==null?'ещё не было':(x.last_ok_age_ms+' ms назад');
   $('diag').innerHTML=`IP: <code>${x.wifi_ip}</code> · RSSI ${x.rssi} dBm · uptime ${x.uptime_s}s<br>Modbus slave ${x.modbus_slave} · RTU TX/RX: ${x.rtu_tx}/${x.rtu_rx} · errors ${x.rtu_errors} · timeouts ${x.rtu_timeouts} · last OK: ${lastOk}<br>Последняя ошибка: ${x.last_error||'нет'}`;
@@ -4047,7 +4230,8 @@ async function modbusSave(){
 
 const TAB_STORAGE_KEY='anenji_active_tab';
 const TAB_RULES=[
- ['Связь','overview'],['Энергопотоки','overview'],['Полная телеметрия','overview'],
+ ['Состояние / аварии','overview'],['Энергопотоки','overview'],['Полная телеметрия','overview'],
+ ['Связь','service'],
  ['Статистика аккумулятора','battery'],
  ['Настройки инвертора','settings'],
  ['RTC / Планировщик','scheduler'],
@@ -4261,6 +4445,7 @@ setTimeout(()=>modbusLoad(),350);
 setTimeout(()=>rtcLoad(),600);
 setTimeout(()=>batteryStatsLoad(),800);
 setTimeout(()=>otaVersionLoad(),950);
+setTimeout(()=>eventsLoad(true),1150);
 async function otaVersionLoad(){
  try{
   const r=await fetch('/api/ota/status?ts='+Date.now(),{cache:'no-store'});
@@ -4423,6 +4608,7 @@ void setupWeb() {
   web.collectHeaders(headerKeys, 1);
   web.on("/", HTTP_GET, handleRoot);
   web.on("/api/status", HTTP_GET, sendJsonStatus);
+  web.on("/api/events", HTTP_GET, handleEvents);
   web.on("/api/refresh", HTTP_GET, handleRefresh);
   web.on("/api/raw", HTTP_GET, handleRaw);
   web.on("/api/raw/status", HTTP_GET, handleRawStatus);
