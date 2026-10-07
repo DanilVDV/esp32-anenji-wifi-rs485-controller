@@ -1,0 +1,117 @@
+name: Promote ANENJI v0.15.0 to main
+
+on:
+  push:
+    branches:
+      - chatgpt/anenji-alerts-v0.15.0
+    paths:
+      - .github/workflows/promote-anenji-v015-main.yml
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+          fetch-depth: 1
+
+      - name: Checkout patch tools
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt/anenji-alerts-v0.15.0
+          path: patchsrc
+          fetch-depth: 1
+
+      - name: Adapt patcher to current UI anchors
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('patchsrc/tools/apply_anenji_alerts_v0_15_0.py')
+          s=p.read_text(encoding='utf-8')
+          old="""    if old not in s:\n        raise SystemExit(f'Anchor not found: {label}')\n"""
+          new="""    if old not in s:\n        if label == 'alert html':\n            needle = '<div class=\"card\"><h2>Полная телеметрия</h2><div id=\"tele\" class=\"grid\"></div><div class=\"toolbar\" style=\"margin-top:12px\"><button onclick=\"statusLoad(true)\">Обновить сейчас</button><span id=\"age\" class=\"small\"></span></div></div>\\n'\n            if needle in s:\n                insert = new\n                prefix = '</div></div>\\n'\n                if insert.startswith(prefix): insert = insert[len(prefix):]\n                s = s.replace(needle, insert, 1)\n                return\n        if label == 'alert javascript':\n            needle = 'let autonomyAvgW=null,autonomyLastMs=0;\\n'\n            if needle in s:\n                insert = new\n                prefix = '];\\n'\n                if insert.startswith(prefix): insert = insert[len(prefix):]\n                s = s.replace(needle, insert, 1)\n                return\n        if label == 'status render':\n            pos = s.find(\"$('tele').innerHTML=teleDefs.map\")\n            if pos >= 0:\n                line_start = s.rfind('\\n', 0, pos) + 1\n                line_end = s.find('\\n', pos)\n                if line_end < 0: line_end = len(s)\n                indent = s[line_start:pos]\n                original = s[line_start:line_end+1]\n                s = s[:line_start] + original + indent + 'renderAlerts(x); eventsLoad(force);\\n' + s[line_end+1:]\n                return\n        raise SystemExit(f'Anchor not found: {label}')\n"""
+          if old not in s:
+              raise SystemExit('patcher helper anchor missing')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+
+      - name: Apply v0.15.0 feature patch
+        run: python3 patchsrc/tools/apply_anenji_alerts_v0_15_0.py base
+
+      - name: Move Connection to Service and Alerts to Overview
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('base/firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
+          s=p.read_text(encoding='utf-8')
+
+          conn='''<div class="card"><h2>Связь</h2>\n<div class="toolbar" style="margin-bottom:10px">\n  <span id="wifiBadge" class="badge offline">Wi‑Fi OFFLINE</span>\n  <span id="invBadge" class="badge offline">Инвертор OFFLINE</span>\n</div>\n<div id="diag"></div>\n<details style="margin-top:8px"><summary>Расширенная диагностика</summary><div id="diagExtra" class="small" style="margin-top:8px"></div></details>\n</div>\n'''
+          alert='''<div class="card"><h2>Состояние / аварии</h2>\n <div class="alert-summary"><div class="alert-box"><small>Режим</small><b id="alertMode">—</b></div><div class="alert-box critical"><small>Активные аварии</small><b id="alertFaultCount">0</b></div><div class="alert-box warning"><small>Активные предупреждения</small><b id="alertWarningCount">0</b></div></div>\n <div id="activeAlerts" class="alert-list"><div class="small">Нет активных аварий.</div></div>\n <details style="margin-top:10px"><summary>Журнал событий</summary><div id="eventLog" class="alert-list" style="margin-top:8px"><div class="small">—</div></div></details>\n</div>\n'''
+          state='''<div class="card"><h2>Состояние / аварии</h2>\n <div class="toolbar" style="margin-bottom:10px">\n  <span id="stateWifiBadge" class="badge offline">Wi‑Fi OFFLINE</span>\n  <span id="stateInvBadge" class="badge offline">Инвертор OFFLINE</span>\n </div>\n <div class="alert-summary"><div class="alert-box"><small>Режим</small><b id="alertMode">—</b></div><div class="alert-box critical"><small>Активные аварии</small><b id="alertFaultCount">0</b></div><div class="alert-box warning"><small>Активные предупреждения</small><b id="alertWarningCount">0</b></div></div>\n <div id="activeAlerts" class="alert-list"><div class="small">Нет активных аварий.</div></div>\n <details style="margin-top:10px"><summary>Журнал событий</summary><div id="eventLog" class="alert-list" style="margin-top:8px"><div class="small">—</div></div></details>\n</div>\n'''
+          energy='<div class="card"><h2>Энергопотоки</h2>\n'
+          service_anchor='<div class="card"><h2>Чтение регистров</h2>\n'
+
+          if conn not in s: raise SystemExit('connection card not found')
+          if alert not in s: raise SystemExit('alerts card not found')
+          if energy not in s: raise SystemExit('energy card not found')
+          if service_anchor not in s: raise SystemExit('service anchor not found')
+
+          s=s.replace(conn,'',1)
+          s=s.replace(alert,'',1)
+          s=s.replace(energy,state+'\n'+energy,1)
+          s=s.replace(service_anchor,conn+'\n'+service_anchor,1)
+
+          bad=" if(window.lastStatusTelemetry){renderEnergy(window.lastStatusTelemetry);if(window.lastStatusPacket){const x=window.lastStatusPacket,t=x.telemetry||{};renderAlerts(x); eventsLoad(force);\n"
+          s=s.replace(bad,'',1)
+
+          status_old="""  const wb=$('wifiBadge'),ib=$('invBadge');\n  wb.className='badge '+(x.wifi_online?'online':'offline');\n  wb.textContent=x.wifi_online?'Wi‑Fi ONLINE':'Wi‑Fi OFFLINE';\n  ib.className='badge '+(x.inverter_online?'online':'offline');\n  ib.textContent=x.inverter_online?(currentLang==='ru'?'Инвертор ONLINE':'Inverter ONLINE'):(currentLang==='ru'?'Инвертор OFFLINE':'Inverter OFFLINE');\n"""
+          status_new="""  const wb=$('wifiBadge'),ib=$('invBadge'),swb=$('stateWifiBadge'),sib=$('stateInvBadge');\n  const wifiClass='badge '+(x.wifi_online?'online':'offline');\n  const wifiText=x.wifi_online?'Wi‑Fi ONLINE':'Wi‑Fi OFFLINE';\n  const invClass='badge '+(x.inverter_online?'online':'offline');\n  const invText=x.inverter_online?(currentLang==='ru'?'Инвертор ONLINE':'Inverter ONLINE'):(currentLang==='ru'?'Инвертор OFFLINE':'Inverter OFFLINE');\n  if(wb){wb.className=wifiClass;wb.textContent=wifiText;}\n  if(swb){swb.className=wifiClass;swb.textContent=wifiText;}\n  if(ib){ib.className=invClass;ib.textContent=invText;}\n  if(sib){sib.className=invClass;sib.textContent=invText;}\n"""
+          if status_old not in s: raise SystemExit('status badge logic not found')
+          s=s.replace(status_old,status_new,1)
+
+          rules_old="""const TAB_RULES=[\n ['Связь','overview'],['Энергопотоки','overview'],['Полная телеметрия','overview'],\n"""
+          rules_new="""const TAB_RULES=[\n ['Состояние / аварии','overview'],['Энергопотоки','overview'],['Полная телеметрия','overview'],\n ['Связь','service'],\n"""
+          if rules_old not in s: raise SystemExit('TAB_RULES anchor not found')
+          s=s.replace(rules_old,rules_new,1)
+
+          p.write_text(s,encoding='utf-8')
+          PY
+
+      - name: Validate final main candidate
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('base/firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
+          s=p.read_text(encoding='utf-8')
+          required=[
+            'const char* FW_VERSION = "0.15.0";',
+            'readHolding(100, 10, d, RTU_POLL_TIMEOUT_MS)',
+            'web.on("/api/events", HTTP_GET, handleEvents);',
+            'id="stateWifiBadge"',
+            'id="stateInvBadge"',
+            "['Состояние / аварии','overview']",
+            "['Связь','service']",
+          ]
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit('Missing: '+repr(missing))
+          if s.find('<div class="card"><h2>Состояние / аварии</h2>') > s.find('<div class="card"><h2>Энергопотоки</h2>'):
+              raise SystemExit('alerts card is not above energy flows')
+          if s.count('renderAlerts(x); eventsLoad(force);') != 1:
+              raise SystemExit('unexpected renderAlerts call count')
+          print('Final candidate bytes:',p.stat().st_size)
+          PY
+
+      - name: Commit firmware to main
+        working-directory: base
+        run: |
+          git config user.name "ChatGPT"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          git commit -m "Add inverter alerts and reorganize status UI"
+          git push origin HEAD:main
