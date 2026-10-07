@@ -43,7 +43,7 @@ jobs:
             'if (otaInProgress || otaRestartPending || dataloggerServiceMode) return;',
             'if (setupMode || dataloggerServiceMode || wifiSsid.length() == 0)',
             '} else if (!dataloggerServiceMode && WiFi.status() != WL_CONNECTED && wifiSsid.length()) {',
-            'dataloggerServiceMode=true; wifiDisconnectedSinceMs=0; inverterOfflineSinceMs=0;',
+            'dataloggerServiceMode=true;wifiDisconnectedSinceMs=0;inverterOfflineSinceMs=0;',
             "dlReq('/api/datalogger/service-ap/start')",
             "dlReq('/api/datalogger/restore')",
             'handleDataloggerSetParam',
@@ -51,7 +51,7 @@ jobs:
           ]
           missing=[x for x in req if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
-          if 'handleDataloggerSetParam(){\n  if(!adminAuthorized())' not in s:
+          if 'void handleDataloggerSetParam(){\n  if(!adminAuthorized())' not in s:
             raise SystemExit('dangerous datalogger writes must remain admin-protected')
           for fn in ['handleDataloggerServiceApStart','handleDataloggerConnect','handleDataloggerRestore']:
             pos=s.find('void '+fn+'(){')
