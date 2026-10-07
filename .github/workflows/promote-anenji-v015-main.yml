@@ -67,8 +67,12 @@ jobs:
           s=s.replace(energy,state+'\n'+energy,1)
           s=s.replace(service_anchor,conn+'\n'+service_anchor,1)
 
-          bad=" if(window.lastStatusTelemetry){renderEnergy(window.lastStatusTelemetry);if(window.lastStatusPacket){const x=window.lastStatusPacket,t=x.telemetry||{};renderAlerts(x); eventsLoad(force);\n"
-          s=s.replace(bad,'',1)
+          lines=[]
+          for line in s.splitlines(True):
+              if 'if(window.lastStatusTelemetry)' in line and 'renderAlerts(x); eventsLoad(force);' in line:
+                  continue
+              lines.append(line)
+          s=''.join(lines)
 
           status_old="""  const wb=$('wifiBadge'),ib=$('invBadge');\n  wb.className='badge '+(x.wifi_online?'online':'offline');\n  wb.textContent=x.wifi_online?'Wi‑Fi ONLINE':'Wi‑Fi OFFLINE';\n  ib.className='badge '+(x.inverter_online?'online':'offline');\n  ib.textContent=x.inverter_online?(currentLang==='ru'?'Инвертор ONLINE':'Inverter ONLINE'):(currentLang==='ru'?'Инвертор OFFLINE':'Inverter OFFLINE');\n"""
           status_new="""  const wb=$('wifiBadge'),ib=$('invBadge'),swb=$('stateWifiBadge'),sib=$('stateInvBadge');\n  const wifiClass='badge '+(x.wifi_online?'online':'offline');\n  const wifiText=x.wifi_online?'Wi‑Fi ONLINE':'Wi‑Fi OFFLINE';\n  const invClass='badge '+(x.inverter_online?'online':'offline');\n  const invText=x.inverter_online?(currentLang==='ru'?'Инвертор ONLINE':'Inverter ONLINE'):(currentLang==='ru'?'Инвертор OFFLINE':'Inverter OFFLINE');\n  if(wb){wb.className=wifiClass;wb.textContent=wifiText;}\n  if(swb){swb.className=wifiClass;swb.textContent=wifiText;}\n  if(ib){ib.className=invClass;ib.textContent=invText;}\n  if(sib){sib.className=invClass;sib.textContent=invText;}\n"""
