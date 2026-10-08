@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650">
+  <style>
+    text{font-family:Arial,sans-serif;fill:#111827}.h{font-size:30px;font-weight:700}.t{font-size:22px}.s{font-size:18px}.box{fill:#f8fafc;stroke:#334155;stroke-width:2}.pin{fill:#fff;stroke:#64748b;stroke-width:2}.line{stroke:#334155;stroke-width:3;fill:none}
+  </style>
+  <text x="600" y="45" text-anchor="middle" class="h">ESP32 DevKit — выводы проекта · питание модулей 3.3 V</text>
+  <rect x="410" y="90" width="380" height="500" rx="28" class="box"/>
+  <text x="600" y="135" text-anchor="middle" class="h">ESP32 DevKit</text>
+  <text x="600" y="170" text-anchor="middle" class="s">GPIO — главный ориентир; подписи на DevKit отличаются</text>
+  <rect x="445" y="215" width="310" height="48" rx="10" class="pin"/><text x="600" y="247" text-anchor="middle" class="t">GPIO16 · RX2 · IO16 · D16</text>
+  <rect x="445" y="275" width="310" height="48" rx="10" class="pin"/><text x="600" y="307" text-anchor="middle" class="t">GPIO17 · TX2 · IO17 · D17</text>
+  <rect x="445" y="335" width="310" height="48" rx="10" class="pin"/><text x="600" y="367" text-anchor="middle" class="t">GPIO4 · D4 · IO4</text>
+  <rect x="445" y="395" width="310" height="48" rx="10" class="pin"/><text x="600" y="427" text-anchor="middle" class="t">GPIO21 · SDA · D21 · IO21</text>
+  <rect x="445" y="455" width="310" height="48" rx="10" class="pin"/><text x="600" y="487" text-anchor="middle" class="t">GPIO22 · SCL · D22 · IO22</text>
+  <rect x="445" y="515" width="145" height="48" rx="10" class="pin"/><text x="517" y="547" text-anchor="middle" class="t">3V3</text>
+  <rect x="610" y="515" width="145" height="48" rx="10" class="pin"/><text x="682" y="547" text-anchor="middle" class="t">GND</text>
+  <text x="55" y="235" class="t">RS‑485 RO → RX2</text><path d="M340 235 H445" class="line"/>
+  <text x="55" y="295" class="t">RS‑485 DI ← TX2</text><path d="M340 295 H445" class="line"/>
+  <text x="55" y="355" class="t">RS‑485 DE+/RE</text><path d="M340 355 H445" class="line"/>
+  <text x="820" y="415" class="t">I²C SDA → RTC / EEPROM / ADS1115</text><path d="M755 415 H805" class="line"/>
+  <text x="820" y="475" class="t">I²C SCL → RTC / EEPROM / ADS1115</text><path d="M755 475 H805" class="line"/>
+  <text x="820" y="535" class="t">VCC модулей → 3V3</text><path d="M755 535 H805" class="line"/>
+  <text x="820" y="570" class="t">Общий GND</text><path d="M755 555 H805" class="line"/>
+</svg>
