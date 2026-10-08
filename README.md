@@ -2,7 +2,7 @@
 
 Прошивка для **ESP32-WROOM-32 / ESP32 Dev Module**, предназначенная для локального мониторинга и управления инвертором **ANENJI ANJ-4000W-24V-WIFI** по Modbus RTU/RS‑485.
 
-Версия исходной прошивки: **0.14.31**.
+Текущая версия прошивки: **0.15.7**.
 
 ## Подключение к инвертору
 
@@ -39,40 +39,43 @@
 
 ## Демонстрация Web UI
 
-Короткое превью интерфейса:
+Короткое превью актуального интерфейса **v0.15.7**:
 
-<p align="center">
-  <img src="docs/media/demo.gif" alt="ESP32 ANENJI Web UI demo" width="480">
-</p>
+<p align="center"><img src="docs/media/ui-v0157-preview.gif" alt="ANENJI ESP32 Web UI v0.15.7 preview" width="900"></p>
 
-<p align="center">
-  <a href="docs/media/demo.mp4">▶ Открыть полное видео (около 44 секунд)</a>
-</p>
+Скриншоты сгруппированы по страницам интерфейса. Для каждой страницы оставлены только 2–3 характерных кадра.
 
-### Скриншоты
+### Обзор
+<p align="center"><img src="docs/media/ui-v0157-overview-1.png" width="46%"> <img src="docs/media/ui-v0157-overview-2.png" width="46%"></p>
 
-<table>
-  <tr>
-    <td align="center"><b>Обзор / энергетическая схема</b><br><img src="docs/media/dashboard.webp" alt="Dashboard" width="420"></td>
-    <td align="center"><b>Статистика аккумулятора</b><br><img src="docs/media/battery-stats.webp" alt="Battery statistics" width="420"></td>
-  </tr>
-  <tr>
-    <td align="center"><b>Время / Планировщик</b><br><img src="docs/media/rtc-scheduler.webp" alt="Time and scheduler" width="420"></td>
-    <td align="center"><b>Wi-Fi / сеть ESP32 и Modbus / RS-485</b><br><img src="docs/media/network-modbus.webp" alt="Network and Modbus settings" width="420"></td>
-  </tr>
-  <tr>
-    <td align="center" colspan="2"><b>Сервис / PZEM-016 / OTA</b><br><img src="docs/media/service-pzem-ota.webp" alt="Service PZEM OTA page" width="420"></td>
-  </tr>
-</table>
+### Батарея
+<p align="center"><img src="docs/media/ui-v0157-battery-1.png" width="31%"> <img src="docs/media/ui-v0157-battery-2.png" width="31%"> <img src="docs/media/ui-v0157-battery-3.png" width="31%"></p>
 
-> Скриншоты сделаны с реального Web UI текущей версии прошивки. Значения телеметрии на них приведены только как пример работы интерфейса.
+### Настройки
+<p align="center"><img src="docs/media/ui-v0157-settings-1.png" width="31%"> <img src="docs/media/ui-v0157-settings-2.png" width="31%"> <img src="docs/media/ui-v0157-settings-3.png" width="31%"></p>
+
+### Планировщик
+<p align="center"><img src="docs/media/ui-v0157-scheduler-1.png" width="46%"> <img src="docs/media/ui-v0157-scheduler-2.png" width="46%"></p>
+
+### Сеть
+<p align="center"><img src="docs/media/ui-v0157-network-1.png" width="46%"> <img src="docs/media/ui-v0157-network-2.png" width="46%"></p>
+
+### Сервис
+<p align="center"><img src="docs/media/ui-v0157-service-1.png" width="46%"> <img src="docs/media/ui-v0157-service-2.png" width="46%"></p>
+
+> Медиа генерируются из Web UI той же версии прошивки. Старые `demo.gif`, `demo.mp4` и прежние разрозненные скриншоты README больше не использует.
 
 ## Возможности
 
 - Wi‑Fi STA и captive Setup AP для первичной настройки;
 - встроенный Web UI на порту 80;
 - чтение телеметрии ANENJI каждые ~2 с;
-- чтение и изменение разрешённого набора Modbus-регистров;
+- чтение и изменение разрешённого набора Modbus-регистров с проверкой диапазонов и взаимосвязей;
+- полный warning map bit0..20, включая lithium communication и превышение тока разряда;
+- отображение masked и unmasked warning-кодов;
+- подтверждённые R/W `316` (dry contact) и `338` (automatic mains output);
+- регистр `344` помечен reserved и заблокирован для записи;
+- опасные `420/425/426/460/461` не доступны через обычную запись и планировщик;
 - профили батарей 24 В `8S 1P` / `8S 2P`;
 - справочные профили 48 В с блокировкой несовместимого применения;
 - raw register explorer;

@@ -196,12 +196,13 @@ static const char* const INVERTER_FAULTS[] = {
   "Parallel versions incompatible"
 };
 static const char* const INVERTER_WARNINGS[] = {
-  "Reserved warning bit 0", "Mains waveform abnormal", "Reserved warning bit 2", "Mains low voltage",
+  "Mains supply zero-crossing loss", "Mains waveform abnormal", "Mains over voltage", "Mains low voltage",
   "Mains over frequency", "Mains low frequency", "PV low voltage", "Over temperature",
   "Battery low voltage", "Battery not connected", "Overload", "Battery equalization charging",
-  "Battery undervoltage", "Output power derating", "Fan blocked", "PV energy too low to use",
+  "Battery undervoltage / recovery point not reached", "Output power derating", "Fan blocked", "PV energy too low to use",
   "Parallel communication interrupted", "Single/parallel output mode inconsistent",
-  "Parallel battery voltage difference too large"
+  "Parallel battery voltage difference too large", "Lithium battery communication abnormal",
+  "Battery discharge current exceeds configured limit"
 };
 const uint8_t INVERTER_FAULT_COUNT = sizeof(INVERTER_FAULTS)/sizeof(INVERTER_FAULTS[0]);
 const uint8_t INVERTER_WARNING_COUNT = sizeof(INVERTER_WARNINGS)/sizeof(INVERTER_WARNINGS[0]);
@@ -506,8 +507,8 @@ HardwareSerial RS485(2);
 WebServer web(80);
 
 
-const char* FW_VERSION = "0.15.6";
-const char* FW_VERSION_PREVIOUS = "0.15.5";
+const char* FW_VERSION = "0.15.7";
+const char* FW_VERSION_PREVIOUS = "0.15.6";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -544,6 +545,7 @@ bool inverterDiagValid = false;
 uint32_t inverterDiagUpdatedMs = 0;
 uint32_t inverterFaultMask = 0;
 uint32_t inverterWarningMask = 0;
+uint32_t inverterWarningUnmaskedMask = 0;
 uint32_t inverterPrevFaultMask = 0;
 uint32_t inverterPrevWarningMask = 0;
 bool inverterMasksInitialized = false;
@@ -1242,6 +1244,7 @@ void pollTelemetry() {
     for (int i=0;i<10;++i) inverterDiagRaw[i]=d[i];
     inverterDiagValid=true; inverterDiagUpdatedMs=millis();
     inverterFaultMask=((uint32_t)d[0]<<16)|d[1];
+    inverterWarningUnmaskedMask=((uint32_t)d[4]<<16)|d[5];
     inverterWarningMask=((uint32_t)d[8]<<16)|d[9];
     processInverterMasks(inverterFaultMask,inverterWarningMask);
   }
@@ -1351,6 +1354,7 @@ const SettingDef SETTINGS[] = {
   {309,"Прочие","Автоперезапуск после перегрева",SK_SELECT,1,0,1,true},
   {310,"Прочие","Overload bypass",SK_SELECT,1,0,1,true},
   {313,"АКБ","Выравнивание АКБ",SK_SELECT,1,0,1,true},
+  {316,"Прочие","Dry contact / Grounding box",SK_SELECT,1,0,1,true},
   {320,"Основные","Выходное напряжение",SK_SELECT,1,2200,2400,true},
   {321,"Основные","Выходная частота",SK_SELECT,1,5000,6000,true},
   {322,"АКБ","Тип АКБ",SK_SELECT,1,0,2,true},
@@ -1360,18 +1364,19 @@ const SettingDef SETTINGS[] = {
   {326,"АКБ","Возврат к сети, напряжение",SK_NUMBER,10,0,6553.5,true},
   {327,"АКБ","Low DC в режиме сети",SK_NUMBER,10,0,6553.5,true},
   {329,"АКБ","Low DC off-grid",SK_NUMBER,10,0,6553.5,true},
-  {330,"АКБ","CV -> Float, время",SK_NUMBER,1,0,600,true},
+  {330,"АКБ","CV -> Float, время",SK_NUMBER,1,0,900,true},
   {331,"АКБ","Приоритет зарядки",SK_SELECT,1,1,4,true},
-  {332,"АКБ","Макс. ток зарядки",SK_NUMBER,10,0,6553.5,true},
-  {333,"АКБ","Макс. ток зарядки от сети",SK_NUMBER,10,0,6553.5,true},
+  {332,"АКБ","Макс. ток зарядки",SK_NUMBER,10,10,80,true},
+  {333,"АКБ","Макс. ток зарядки от сети",SK_NUMBER,10,2,80,true},
   {334,"АКБ","Напряжение equalization",SK_NUMBER,10,0,6553.5,true},
-  {335,"АКБ","Equalization time",SK_NUMBER,1,0,180,true},
-  {336,"АКБ","Equalization timeout",SK_NUMBER,1,0,300,true},
+  {335,"АКБ","Equalization time",SK_NUMBER,1,0,900,true},
+  {336,"АКБ","Equalization timeout",SK_NUMBER,1,0,900,true},
   {337,"АКБ","Equalization interval",SK_NUMBER,1,1,90,true},
-  {341,"SOC","Low DC SOC в режиме сети",SK_NUMBER,1,0,100,true},
-  {342,"SOC","Recovery SOC",SK_NUMBER,1,0,100,true},
-  {343,"SOC","Off-grid cut-off SOC",SK_NUMBER,1,0,100,true},
-  {344,"Основные","Макс. отдача в сеть",SK_NUMBER,1,0,6200,true},
+  {338,"Прочие","Automatic mains output",SK_SELECT,1,0,1,true},
+  {341,"SOC","Low DC SOC в режиме сети",SK_NUMBER,1,20,50,true},
+  {342,"SOC","Recovery SOC",SK_NUMBER,1,60,100,true},
+  {343,"SOC","Off-grid cut-off SOC",SK_NUMBER,1,3,30,true},
+  {344,"Основные","Reserved 344 — запись заблокирована",SK_NUMBER,1,0,65535,false},
   {351,"АКБ","Макс. ток разряда АКБ",SK_NUMBER,1,0,65535,true},
   {406,"Remote","Turn-on mode",SK_SELECT,1,0,2,true}
 };
@@ -1390,7 +1395,7 @@ bool validSelectRaw(uint16_t reg, uint16_t raw) {
     case 301: return raw >= 1 && raw <= 4;
     case 302: return raw <= 2;
     case 303: return raw <= 3;
-    case 305: case 306: case 307: case 308: case 309: case 310: case 313:
+    case 305: case 306: case 307: case 308: case 309: case 310: case 313: case 316: case 338:
       return raw <= 1;
     case 320: return raw == 2200 || raw == 2300 || raw == 2400;
     case 321: return raw == 5000 || raw == 6000;
@@ -1418,6 +1423,35 @@ bool validateRaw(uint16_t reg, uint16_t raw, String& err) {
   if (userVal < s->minVal || userVal > s->maxVal) {
     err = F("Value outside allowed range");
     return false;
+  }
+
+  uint16_t other=0;
+  if (reg==332 && getCachedSettingRaw(333,other) && raw < other) {
+    err = F("Maximum charge current must be >= mains charge current"); return false;
+  }
+  if (reg==333 && getCachedSettingRaw(332,other) && raw > other) {
+    err = F("Mains charge current must be <= maximum charge current"); return false;
+  }
+  if (reg==343 && getCachedSettingRaw(341,other) && raw > other) {
+    err = F("Off-grid cut-off SOC must be <= mains SOC protection"); return false;
+  }
+
+  BatterySystemDetect bd=detectBatterySystem();
+  uint16_t J=(bd.systemV==24?2:(bd.systemV==48?4:0));
+  if(J){
+    uint16_t A=0,B=0,C=0,D=0,E=0,Fv=0;
+    getCachedSettingRaw(323,A); getCachedSettingRaw(324,B); getCachedSettingRaw(325,C);
+    getCachedSettingRaw(326,D); getCachedSettingRaw(327,E); getCachedSettingRaw(329,Fv);
+    if(reg==323 && B && (raw < B+10*J || raw > 165*J)){err=F("Battery OVP violates B/J limits");return false;}
+    if(reg==324 && C && A && (raw < C || raw > A-10*J)){err=F("Bulk/CV violates C/A/J limits");return false;}
+    if(reg==325 && B && (raw < 120*J || raw > B)){err=F("Float violates J/B limits");return false;}
+    if(reg==326 && raw!=0 && B && E && (raw < max((uint16_t)(120*J),E) || raw > B-5*J)){err=F("Mains recovery voltage violates B/E/J limits");return false;}
+    if(reg==327 && Fv){
+      uint16_t lo=max((uint16_t)(110*J),Fv), hi=(uint16_t)(143*J); if(D) hi=min(hi,D);
+      if(raw<lo || raw>hi){err=F("Mains low-voltage point violates D/F/J limits");return false;}
+    }
+    if(reg==329 && E && (raw < 100*J || raw > min((uint16_t)(135*J),E))){err=F("Off-grid low-voltage point violates E/J limits");return false;}
+    if(reg==334 && C && A && (raw < C || raw > A-5*J)){err=F("Equalization voltage violates C/A/J limits");return false;}
   }
   return true;
 }
@@ -2510,6 +2544,9 @@ void handleScheduleSet() {
   }
   uint16_t reg=(uint16_t)regD,raw=(uint16_t)rawD;
   String verr;
+  if (reg==316 || reg==338 || reg>=400 || reg==344) {
+    sendJson(400,F("{\"ok\":false,\"error\":\"This register is blocked in scheduler\"}")); return;
+  }
   if (!validateRaw(reg,raw,verr)) {
     String j=F("{\"ok\":false,\"error\":\"");j+=jsonEscape(verr);j+=F("\"}");sendJson(400,j);return;
   }
@@ -2605,10 +2642,12 @@ void sendJsonStatus() {
   j += F(",\"age_ms\":"); if(inverterDiagUpdatedMs) j+=(uint32_t)(millis()-inverterDiagUpdatedMs); else j+=F("null");
   j += F(",\"fault_raw\":"); j += inverterFaultMask;
   j += F(",\"warning_raw\":"); j += inverterWarningMask;
+  j += F(",\"warning_unmasked_raw\":"); j += inverterWarningUnmaskedMask;
   j += F(",\"operation_mode\":"); if(haveReg(201)) j+=telemetryRaw[1]; else j+=F("null");
   j += F(",\"operation_mode_text\":\""); j += haveReg(201)?inverterModeText((uint8_t)telemetryRaw[1]):"Unknown"; j += '"';
   j += F(",\"faults\":"); appendMaskNamesJson(j,inverterFaultMask,INVERTER_FAULTS,INVERTER_FAULT_COUNT);
   j += F(",\"warnings\":"); appendMaskNamesJson(j,inverterWarningMask,INVERTER_WARNINGS,INVERTER_WARNING_COUNT);
+  j += F(",\"warnings_unmasked\":"); appendMaskNamesJson(j,inverterWarningUnmaskedMask,INVERTER_WARNINGS,INVERTER_WARNING_COUNT);
   j += F(",\"event_count\":"); j += inverterEventCount; j += '}';
   j += F(",\"pzem\":{\"enabled\":"); j += pzemEnabled?F("true"):F("false");
   j += F(",\"online\":"); j += pzemOnline?F("true"):F("false");
