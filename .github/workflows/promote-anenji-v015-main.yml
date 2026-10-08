@@ -22,19 +22,36 @@ jobs:
           ref: main
           fetch-depth: 1
 
-      - name: Load v0.15.7 patch tools
+      - name: Load v0.15.7 tools
         run: |
           git fetch origin chatgpt/anenji-alerts-v0.15.0
           git show origin/chatgpt/anenji-alerts-v0.15.0:tools/promote_v0157.py > /tmp/promote_v0157.py
           git show origin/chatgpt/anenji-alerts-v0.15.0:tools/render_readme_ui_v0157.js > /tmp/render_readme_ui_v0157.js
 
-      - name: Patch firmware
-        run: python3 /tmp/promote_v0157.py patch
+      - name: Patch firmware when needed
+        run: |
+          if grep -q 'FW_VERSION = "0.15.7"' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino; then
+            echo 'v0.15.7 already present on main'
+          else
+            python3 /tmp/promote_v0157.py patch
+          fi
 
       - name: Validate firmware and embedded JavaScript
         run: |
           python3 /tmp/promote_v0157.py validate
           node --check /tmp/embedded.js
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Arduino core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile ESP32 firmware
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ANENJI_ESP32_Controller
 
       - name: Install README renderer dependencies
         run: |
@@ -44,7 +61,7 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install --silent playwright-core
 
-      - name: Render current Web UI media
+      - name: Render distinct Web UI media
         run: node /tmp/render_readme_ui_v0157.js
 
       - name: Refresh README
@@ -53,10 +70,14 @@ jobs:
           python3 /tmp/promote_v0157.py validate_readme
           git diff --check
 
-      - name: Commit v0.15.7
+      - name: Commit verified v0.15.7 media
         run: |
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino README.md docs/media/ui-v0157-*.png docs/media/ui-v0157-preview.gif
-          git commit -m "Release v0.15.7 warning safety and refresh README media"
-          git push origin HEAD:main
+          if git diff --cached --quiet; then
+            echo 'No changes to commit'
+          else
+            git commit -m "Verify v0.15.7 build and refresh responsive README media"
+            git push origin HEAD:main
+          fi
