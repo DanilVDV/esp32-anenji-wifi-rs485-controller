@@ -1,0 +1,59 @@
+name: Promote ANENJI v0.15.8
+
+on:
+  push:
+    branches:
+      - chatgpt/anenji-alerts-v0.15.0
+    paths:
+      - .github/workflows/promote-anenji-v015-main.yml
+      - tools/promote_v0158.py
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Load v0.15.8 patch
+        run: |
+          git fetch origin chatgpt/anenji-alerts-v0.15.0
+          git show origin/chatgpt/anenji-alerts-v0.15.0:tools/promote_v0158.py > /tmp/promote_v0158.py
+
+      - name: Patch firmware
+        run: python3 /tmp/promote_v0158.py patch
+
+      - name: Validate firmware and JavaScript
+        run: |
+          python3 /tmp/promote_v0158.py validate
+          node --check /tmp/embedded.js
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Arduino core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile ESP32 firmware
+        run: arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ANENJI_ESP32_Controller
+
+      - name: Update README text
+        run: |
+          python3 /tmp/promote_v0158.py readme
+          git diff --check
+
+      - name: Commit v0.15.8
+        run: |
+          git config user.name "ChatGPT"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino README.md
+          git commit -m "Add dated inverter event log"
+          git push origin HEAD:main
