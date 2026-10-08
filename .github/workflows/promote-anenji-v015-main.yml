@@ -32,12 +32,16 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           p=Path('patchsrc/tools/apply_optional_clock_v0_15_5.py')
           s=p.read_text(encoding='utf-8')
-          old=r"(?=\nasync function ntpSave\(\)\{)"
-          new=r"(?=\nfunction ntpServerChoice\(\)\{)"
-          if old not in s: raise SystemExit('NTP UI patch anchor missing')
-          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          # The original v0.15.5 patcher carried a UI-only rtcSyncNtp replacement
+          # based on an obsolete JS function order. The dedicated UI fixer below
+          # owns that function now, so remove only the obsolete patch operation.
+          pat=r"sub_once\(r'async function rtcSyncNtp\\\(\\\)\\\{\.\*\?\(\?=\\nasync function ntpSave\\\(\\\)\\\{\)',.*?'NTP UI sync', re\.S\)\n"
+          s2,n=re.subn(pat,'',s,count=1,flags=re.S)
+          if n!=1: raise SystemExit(f'obsolete NTP UI patch removal failed: {n}')
+          p.write_text(s2,encoding='utf-8')
           PY
           python3 patchsrc/tools/apply_optional_clock_v0_15_5.py base
           python3 patchsrc/tools/fix_optional_clock_ui_v0_15_5.py base
