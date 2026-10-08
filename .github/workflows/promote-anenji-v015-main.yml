@@ -29,7 +29,18 @@ jobs:
           fetch-depth: 1
 
       - name: Apply optional clock patch
-        run: python3 patchsrc/tools/apply_optional_clock_v0_15_5.py base
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('patchsrc/tools/apply_optional_clock_v0_15_5.py')
+          s=p.read_text(encoding='utf-8')
+          old=r"(?=\nasync function ntpSave\(\)\{)"
+          new=r"(?=\nfunction ntpServerChoice\(\)\{)"
+          if old not in s: raise SystemExit('NTP UI patch anchor missing')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          python3 patchsrc/tools/apply_optional_clock_v0_15_5.py base
+          python3 patchsrc/tools/fix_optional_clock_ui_v0_15_5.py base
 
       - name: Validate clock fallback and embedded JavaScript
         run: |
@@ -52,12 +63,16 @@ jobs:
             '\"persistent_clock\":',
             '\"persistent_stats\":',
             'DS1307 и AT24C32 опциональны.',
-            'Задания планировщика хранятся в NVS.'
+            'Задания планировщика хранятся в NVS.',
+            "const sched=await api('/api/schedule'); renderSchedule(sched.tasks);",
+            "const h=await verifiedAdminHeaders('rtcMsg'); if(!h)return;",
+            "api('/api/rtc/ntp'",
           ]
           missing=[x for x in req if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
           forbidden=[
             '.pf-card','data-page="power"','renderPowerFlowCard','id="pfBoard"','<h2>Power Flow</h2>',"['Power Flow','power']",
+            "api('/api/ntp/sync'",
             'WiFiUdp.h','DATALOGGER_UDP_PORT','dataloggerServiceMode','handleDatalogger','/api/datalogger/','<h2>Datalogger</h2>','async function dlReq'
           ]
           found=[x for x in forbidden if x in s]
