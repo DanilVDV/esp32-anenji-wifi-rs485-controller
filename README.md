@@ -53,19 +53,19 @@
 
 <table>
   <tr>
-    <td align="center"><b>Обзор / энергетическая схема</b><br><img src="docs/media/dashboard.png" alt="Dashboard" width="420"></td>
-    <td align="center"><b>Статистика аккумулятора</b><br><img src="docs/media/battery-stats.png" alt="Battery statistics" width="420"></td>
+    <td align="center"><b>Обзор / энергетическая схема</b><br><img src="docs/media/dashboard.webp" alt="Dashboard" width="420"></td>
+    <td align="center"><b>Статистика аккумулятора</b><br><img src="docs/media/battery-stats.webp" alt="Battery statistics" width="420"></td>
   </tr>
   <tr>
-    <td align="center"><b>RTC и планировщик</b><br><img src="docs/media/rtc-scheduler.png" alt="RTC scheduler" width="420"></td>
-    <td align="center"><b>Wi-Fi и Modbus / RS-485</b><br><img src="docs/media/network-modbus.png" alt="Network and Modbus settings" width="420"></td>
+    <td align="center"><b>Время / Планировщик</b><br><img src="docs/media/rtc-scheduler.webp" alt="Time and scheduler" width="420"></td>
+    <td align="center"><b>Wi-Fi / сеть ESP32 и Modbus / RS-485</b><br><img src="docs/media/network-modbus.webp" alt="Network and Modbus settings" width="420"></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><b>PZEM-016, OTA и чтение регистров</b><br><img src="docs/media/service-pzem-ota.png" alt="PZEM OTA service page" width="420"></td>
+    <td align="center" colspan="2"><b>Сервис / PZEM-016 / OTA</b><br><img src="docs/media/service-pzem-ota.webp" alt="Service PZEM OTA page" width="420"></td>
   </tr>
 </table>
 
-> Скриншоты сделаны с реального Web UI этой версии прошивки. Значения телеметрии на них приведены только как пример работы интерфейса.
+> Скриншоты сделаны с реального Web UI текущей версии прошивки. Значения телеметрии на них приведены только как пример работы интерфейса.
 
 ## Возможности
 
@@ -323,17 +323,18 @@ X-ANENJI-Admin: <admin-password>
 │   ├── media/
 │   │   ├── demo.gif
 │   │   ├── demo.mp4
-│   │   ├── dashboard.png
-│   │   ├── battery-stats.png
-│   │   ├── rtc-scheduler.png
-│   │   ├── network-modbus.png
-│   │   ├── service-pzem-ota.png
+│   │   ├── dashboard.webp
+│   │   ├── battery-stats.webp
+│   │   ├── rtc-scheduler.webp
+│   │   ├── network-modbus.webp
+│   │   ├── service-pzem-ota.webp
 │   │   ├── module-esp32-devkit.webp
 │   │   ├── module-max485.webp
 │   │   ├── module-tiny-rtc-at24c32.webp
 │   │   ├── rj45-rs485-pinout.svg
-│   │   └── rj45-rs485-bms-connection.png
+│   │   ├── rj45-rs485-bms-connection.png
 │   │   └── wiring-modules.png
+│   ├── screenshots.md
 │   ├── api.md
 │   ├── architecture.md
 │   ├── registers.md
