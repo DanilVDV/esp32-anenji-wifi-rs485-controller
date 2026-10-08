@@ -1,4 +1,4 @@
-name: Promote readable README layout
+name: Promote ANENJI v0.15.7
 
 on:
   push:
@@ -20,54 +20,248 @@ jobs:
           ref: main
           fetch-depth: 1
 
-      - name: Replace stale README media layout
+      - name: Patch firmware v0.15.7
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('README.md')
-          s = p.read_text(encoding='utf-8')
-          s = s.replace('Версия исходной прошивки: **0.14.31**.', 'Текущая версия прошивки: **0.15.6**.')
-          section = s.index('## Демонстрация Web UI')
-          shots = s.index('### Скриншоты', section)
-          s = s[:section] + '''## Демонстрация Web UI
+          import re
+          p=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
+          s=p.read_text(encoding='utf-8')
+          def one(old,new,label):
+              global s
+              if s.count(old)!=1:
+                  raise SystemExit(f'{label}: expected one occurrence, got {s.count(old)}')
+              s=s.replace(old,new,1)
 
-Ниже показаны актуальные экраны Web UI **v0.15.6**. Старые `demo.gif` и `demo.mp4` больше не используются в README.
+          one('const char* FW_VERSION = "0.15.6";\nconst char* FW_VERSION_PREVIOUS = "0.15.5";',
+              'const char* FW_VERSION = "0.15.7";\nconst char* FW_VERSION_PREVIOUS = "0.15.6";', 'version')
 
-### Скриншоты
+          old_warn=re.search(r'static const char\* const INVERTER_WARNINGS\[\] = \{.*?\n\};',s,re.S)
+          if not old_warn: raise SystemExit('warning map not found')
+          new_warn='''static const char* const INVERTER_WARNINGS[] = {
+  "Mains supply zero-crossing loss", "Mains waveform abnormal", "Mains over voltage", "Mains low voltage",
+  "Mains over frequency", "Mains low frequency", "PV low voltage", "Over temperature",
+  "Battery low voltage", "Battery not connected", "Overload", "Battery equalization charging",
+  "Battery undervoltage / recovery point not reached", "Output power derating", "Fan blocked", "PV energy too low to use",
+  "Parallel communication interrupted", "Single/parallel output mode inconsistent",
+  "Parallel battery voltage difference too large", "Lithium battery communication abnormal",
+  "Battery discharge current exceeds configured limit"
+};'''
+          s=s[:old_warn.start()]+new_warn+s[old_warn.end():]
 
-''' + s[shots + len('### Скриншоты\n\n'):]
-          table_start = s.index('<table>', section)
-          table_end = s.index('</table>', table_start) + len('</table>')
-          gallery = '''### Обзор / энергетическая схема
-<p align="center"><a href="docs/media/dashboard.webp"><img src="docs/media/dashboard.webp" alt="Обзор и энергетическая схема" width="900"></a></p>
+          one('uint32_t inverterWarningMask = 0;\nuint32_t inverterPrevFaultMask = 0;',
+              'uint32_t inverterWarningMask = 0;\nuint32_t inverterWarningUnmaskedMask = 0;\nuint32_t inverterPrevFaultMask = 0;', 'unmasked global')
+          one('inverterFaultMask=((uint32_t)d[0]<<16)|d[1];\n    inverterWarningMask=((uint32_t)d[8]<<16)|d[9];',
+              'inverterFaultMask=((uint32_t)d[0]<<16)|d[1];\n    inverterWarningUnmaskedMask=((uint32_t)d[4]<<16)|d[5];\n    inverterWarningMask=((uint32_t)d[8]<<16)|d[9];', 'diag masks')
+          one('j += F(",\\\"warning_raw\\\":"); j += inverterWarningMask;',
+              'j += F(",\\\"warning_raw\\\":"); j += inverterWarningMask;\n  j += F(",\\\"warning_unmasked_raw\\\":"); j += inverterWarningUnmaskedMask;', 'status raw warning')
+          one('j += F(",\\\"warnings\\\":"); appendMaskNamesJson(j,inverterWarningMask,INVERTER_WARNINGS,INVERTER_WARNING_COUNT);',
+              'j += F(",\\\"warnings\\\":"); appendMaskNamesJson(j,inverterWarningMask,INVERTER_WARNINGS,INVERTER_WARNING_COUNT);\n  j += F(",\\\"warnings_unmasked\\\":"); appendMaskNamesJson(j,inverterWarningUnmaskedMask,INVERTER_WARNINGS,INVERTER_WARNING_COUNT);', 'status unmasked list')
 
-### Статистика аккумулятора
-<p align="center"><a href="docs/media/battery-stats.webp"><img src="docs/media/battery-stats.webp" alt="Статистика аккумулятора" width="900"></a></p>
+          one('  {313,"АКБ","Выравнивание АКБ",SK_SELECT,1,0,1,true},\n  {320,"Основные","Выходное напряжение",SK_SELECT,1,2200,2400,true},',
+              '  {313,"АКБ","Выравнивание АКБ",SK_SELECT,1,0,1,true},\n  {316,"Прочие","Dry contact / Grounding box",SK_SELECT,1,0,1,true},\n  {320,"Основные","Выходное напряжение",SK_SELECT,1,2200,2400,true},', 'reg316')
+          one('  {330,"АКБ","CV -> Float, время",SK_NUMBER,1,0,600,true},', '  {330,"АКБ","CV -> Float, время",SK_NUMBER,1,0,900,true},', 'reg330')
+          one('  {332,"АКБ","Макс. ток зарядки",SK_NUMBER,10,0,6553.5,true},', '  {332,"АКБ","Макс. ток зарядки",SK_NUMBER,10,10,80,true},', 'reg332')
+          one('  {333,"АКБ","Макс. ток зарядки от сети",SK_NUMBER,10,0,6553.5,true},', '  {333,"АКБ","Макс. ток зарядки от сети",SK_NUMBER,10,2,80,true},', 'reg333')
+          one('  {335,"АКБ","Equalization time",SK_NUMBER,1,0,180,true},', '  {335,"АКБ","Equalization time",SK_NUMBER,1,0,900,true},', 'reg335')
+          one('  {336,"АКБ","Equalization timeout",SK_NUMBER,1,0,300,true},', '  {336,"АКБ","Equalization timeout",SK_NUMBER,1,0,900,true},', 'reg336')
+          one('  {337,"АКБ","Equalization interval",SK_NUMBER,1,1,90,true},\n  {341,"SOC","Low DC SOC в режиме сети",SK_NUMBER,1,0,100,true},',
+              '  {337,"АКБ","Equalization interval",SK_NUMBER,1,1,90,true},\n  {338,"Прочие","Automatic mains output",SK_SELECT,1,0,1,true},\n  {341,"SOC","Low DC SOC в режиме сети",SK_NUMBER,1,20,50,true},', 'reg338/341')
+          one('  {342,"SOC","Recovery SOC",SK_NUMBER,1,0,100,true},\n  {343,"SOC","Off-grid cut-off SOC",SK_NUMBER,1,0,100,true},\n  {344,"Основные","Макс. отдача в сеть",SK_NUMBER,1,0,6200,true},',
+              '  {342,"SOC","Recovery SOC",SK_NUMBER,1,60,100,true},\n  {343,"SOC","Off-grid cut-off SOC",SK_NUMBER,1,3,30,true},\n  {344,"Основные","Reserved 344 — запись заблокирована",SK_NUMBER,1,0,65535,false},', 'soc/344')
+          one('    case 305: case 306: case 307: case 308: case 309: case 310: case 313:\n      return raw <= 1;',
+              '    case 305: case 306: case 307: case 308: case 309: case 310: case 313: case 316: case 338:\n      return raw <= 1;', 'select 316/338')
 
-### Время / Планировщик
-<p align="center"><a href="docs/media/rtc-scheduler.webp"><img src="docs/media/rtc-scheduler.webp" alt="Время и планировщик" width="900"></a></p>
+          anchor='''  float userVal = ((float)raw) / s->scale;
+  if (userVal < s->minVal || userVal > s->maxVal) {
+    err = F("Value outside allowed range");
+    return false;
+  }
+  return true;
+}'''
+          repl='''  float userVal = ((float)raw) / s->scale;
+  if (userVal < s->minVal || userVal > s->maxVal) {
+    err = F("Value outside allowed range");
+    return false;
+  }
 
-### Wi-Fi / сеть ESP32 и Modbus / RS-485
-<p align="center"><a href="docs/media/network-modbus.webp"><img src="docs/media/network-modbus.webp" alt="Сеть и Modbus" width="900"></a></p>
+  // Cross-register safety constraints from the ANENJI/SRNE Modbus table.
+  uint16_t other=0;
+  if (reg==332 && getCachedSettingRaw(333,other) && raw < other) {
+    err = F("Maximum charge current must be >= mains charge current"); return false;
+  }
+  if (reg==333 && getCachedSettingRaw(332,other) && raw > other) {
+    err = F("Mains charge current must be <= maximum charge current"); return false;
+  }
+  if (reg==343 && getCachedSettingRaw(341,other) && raw > other) {
+    err = F("Off-grid cut-off SOC must be <= mains SOC protection"); return false;
+  }
 
-### Сервис / PZEM-016 / OTA
-<p align="center"><a href="docs/media/service-pzem-ota.webp"><img src="docs/media/service-pzem-ota.webp" alt="Сервис PZEM OTA" width="900"></a></p>'''
-          s = s[:table_start] + gallery + s[table_end:]
-          p.write_text(s, encoding='utf-8')
+  BatterySystemDetect bd=detectBatterySystem();
+  uint16_t J=(bd.systemV==24?2:(bd.systemV==48?4:0));
+  if(J){
+    uint16_t A=0,B=0,C=0,D=0,E=0,Fv=0;
+    getCachedSettingRaw(323,A); getCachedSettingRaw(324,B); getCachedSettingRaw(325,C);
+    getCachedSettingRaw(326,D); getCachedSettingRaw(327,E); getCachedSettingRaw(329,Fv);
+    if(reg==323 && B && (raw < B+10*J || raw > 165*J)){err=F("Battery OVP violates B/J limits");return false;}
+    if(reg==324 && C && A && (raw < C || raw > A-10*J)){err=F("Bulk/CV violates C/A/J limits");return false;}
+    if(reg==325 && B && (raw < 120*J || raw > B)){err=F("Float violates J/B limits");return false;}
+    if(reg==326 && raw!=0 && B && E && (raw < max((uint16_t)(120*J),E) || raw > B-5*J)){err=F("Mains recovery voltage violates B/E/J limits");return false;}
+    if(reg==327 && Fv){
+      uint16_t lo=max((uint16_t)(110*J),Fv), hi=(uint16_t)(143*J); if(D) hi=min(hi,D);
+      if(raw<lo || raw>hi){err=F("Mains low-voltage point violates D/F/J limits");return false;}
+    }
+    if(reg==329 && E && (raw < 100*J || raw > min((uint16_t)(135*J),E))){err=F("Off-grid low-voltage point violates E/J limits");return false;}
+    if(reg==334 && C && A && (raw < C || raw > A-5*J)){err=F("Equalization voltage violates C/A/J limits");return false;}
+  }
+  return true;
+}'''
+          one(anchor,repl,'dynamic validation')
+
+          sched='''  uint16_t reg=(uint16_t)regD,raw=(uint16_t)rawD;
+  String verr;
+  if (!validateRaw(reg,raw,verr)) {'''
+          sched_new='''  uint16_t reg=(uint16_t)regD,raw=(uint16_t)rawD;
+  String verr;
+  if (reg==316 || reg==338 || reg>=400 || reg==344) {
+    sendJson(400,F("{\\\"ok\\\":false,\\\"error\\\":\\\"This register is blocked in scheduler\\\"}")); return;
+  }
+  if (!validateRaw(reg,raw,verr)) {'''
+          one(sched,sched_new,'scheduler safety')
+
+          p.write_text(s,encoding='utf-8')
           PY
 
-      - name: Validate README
+      - name: Validate firmware patch and embedded JavaScript
         run: |
-          grep -q 'Текущая версия прошивки: \*\*0.15.6\*\*' README.md
-          grep -q 'width="900"' README.md
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
+          s=p.read_text(encoding='utf-8')
+          required=['const char* FW_VERSION = "0.15.7";','Lithium battery communication abnormal','Battery discharge current exceeds configured limit','inverterWarningUnmaskedMask','{316,"Прочие","Dry contact / Grounding box"','{338,"Прочие","Automatic mains output"','Reserved 344 — запись заблокирована','This register is blocked in scheduler']
+          missing=[x for x in required if x not in s]
+          if missing: raise SystemExit('missing '+repr(missing))
+          if '{344,"Основные","Макс. отдача в сеть"' in s: raise SystemExit('stale writable 344 remains')
+          m=re.search(r'R"HTML\((.*?)\)HTML"',s,re.S)
+          if not m: raise SystemExit('embedded HTML not found')
+          html=m.group(1)
+          scripts=re.findall(r'<script>(.*?)</script>',html,re.S)
+          Path('/tmp/embedded.js').write_text('\n'.join(scripts),encoding='utf-8')
+          Path('/tmp/ui.html').write_text(html,encoding='utf-8')
+          print('firmware bytes',p.stat().st_size,'scripts',len(scripts))
+          PY
+          node --check /tmp/embedded.js
+
+      - name: Render current UI screenshots
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick
+          mkdir -p /tmp/ui-shot
+          cat > /tmp/ui-shot/render.js <<'JS'
+          const { chromium } = require('playwright-core');
+          const fs = require('fs');
+          (async()=>{
+            const browser=await chromium.launch({headless:true,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox']});
+            const page=await browser.newPage({viewport:{width:1440,height:900},deviceScaleFactor:1});
+            await page.route('**/api/**', async route=>{
+              const url=route.request().url();
+              let body={ok:true};
+              if(url.includes('/api/status')) body={ok:true,firmware_version:'0.15.7',wifi_online:true,inverter_online:true,rssi:-58,uptime_s:123456,modbus_slave:38,write_enabled:true,alerts:{valid:true,fault_raw:0,warning_raw:0,warning_unmasked_raw:0,operation_mode:3,operation_mode_text:'Off-Grid',faults:[],warnings:[],warnings_unmasked:[],event_count:0},pzem:{enabled:true,online:true,address:1,voltage:231.4,current:0.21,power:24.8,energy_kwh:190.994,frequency:49.9,pf:0.50,t1_kwh:2905.181,t2_kwh:1104.418},telemetry:{mode:3,grid_voltage:0,grid_frequency:0,grid_power:0,inverter_voltage:230.2,inverter_current:2.4,inverter_frequency:50,output_voltage:230.2,output_current:2.4,output_frequency:50,output_active_power:552,output_apparent_power:580,battery_voltage:26.3,battery_current:-25.8,battery_power:-678,pv_voltage:59.8,pv_current:9.3,pv_power:558,pv_charging_power:552,load_percent:17,dcdc_temperature:29,inverter_temperature:33,battery_soc:100,net_battery_current:-25.8,inverter_charge_current:0,pv_charge_current:9.3}};
+              else if(url.includes('/api/settings')) body={ok:true,values:[]};
+              else if(url.includes('/api/schedule')) body={ok:true,tasks:[]};
+              else if(url.includes('/api/rtc')) body={ok:true,present:false,valid:true,type:'software',source:'ntp',time:'2026-10-08 12:34:56',ntp_server:'pool.ntp.org',utc_offset_min:180};
+              await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});
+            });
+            await page.goto('file:///tmp/ui.html');
+            await page.waitForTimeout(1200);
+            const pages=[['overview',2],['battery',3],['settings',3],['scheduler',2],['network',2],['service',2]];
+            for(const [id,count] of pages){
+              await page.evaluate(id=>{ const b=document.querySelector('.app-tab[data-page="'+id+'"]'); if(b)b.click(); },id);
+              await page.waitForTimeout(350);
+              const height=await page.evaluate(()=>Math.max(document.body.scrollHeight,document.documentElement.scrollHeight));
+              const max=Math.max(0,height-900);
+              const positions=count===2?[0,max]:[0,Math.round(max/2),max];
+              for(let i=0;i<positions.length;i++){
+                await page.evaluate(y=>scrollTo(0,y),positions[i]); await page.waitForTimeout(120);
+                await page.screenshot({path:`docs/media/ui-v0157-${id}-${i+1}.png`});
+              }
+            }
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cp /tmp/ui.html /tmp/ui-shot/ui.html
+          cd /tmp/ui-shot
+          npm init -y >/dev/null 2>&1
+          npm install --silent playwright-core
+          cd "$GITHUB_WORKSPACE"
+          node /tmp/ui-shot/render.js
+          convert -delay 90 -loop 0 docs/media/ui-v0157-overview-1.png docs/media/ui-v0157-battery-1.png docs/media/ui-v0157-settings-1.png docs/media/ui-v0157-scheduler-1.png docs/media/ui-v0157-network-1.png docs/media/ui-v0157-service-1.png -resize 900x docs/media/ui-v0157-preview.gif
+
+      - name: Refresh README media and register safety notes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('README.md'); s=p.read_text(encoding='utf-8')
+          s=s.replace('Текущая версия прошивки: **0.15.6**.','Текущая версия прошивки: **0.15.7**.')
+          s=s.replace('Версия исходной прошивки: **0.14.31**.','Текущая версия прошивки: **0.15.7**.')
+          start=s.index('## Демонстрация Web UI')
+          end=s.index('\n## Возможности',start)
+          block='''## Демонстрация Web UI
+
+Короткое превью актуального интерфейса **v0.15.7**:
+
+<p align="center"><img src="docs/media/ui-v0157-preview.gif" alt="ANENJI ESP32 Web UI v0.15.7 preview" width="900"></p>
+
+Скриншоты сгруппированы по страницам интерфейса. Для каждой страницы оставлены только 2–3 характерных кадра.
+
+### Обзор
+<p align="center"><img src="docs/media/ui-v0157-overview-1.png" width="46%"> <img src="docs/media/ui-v0157-overview-2.png" width="46%"></p>
+
+### Батарея
+<p align="center"><img src="docs/media/ui-v0157-battery-1.png" width="31%"> <img src="docs/media/ui-v0157-battery-2.png" width="31%"> <img src="docs/media/ui-v0157-battery-3.png" width="31%"></p>
+
+### Настройки
+<p align="center"><img src="docs/media/ui-v0157-settings-1.png" width="31%"> <img src="docs/media/ui-v0157-settings-2.png" width="31%"> <img src="docs/media/ui-v0157-settings-3.png" width="31%"></p>
+
+### Планировщик
+<p align="center"><img src="docs/media/ui-v0157-scheduler-1.png" width="46%"> <img src="docs/media/ui-v0157-scheduler-2.png" width="46%"></p>
+
+### Сеть
+<p align="center"><img src="docs/media/ui-v0157-network-1.png" width="46%"> <img src="docs/media/ui-v0157-network-2.png" width="46%"></p>
+
+### Сервис
+<p align="center"><img src="docs/media/ui-v0157-service-1.png" width="46%"> <img src="docs/media/ui-v0157-service-2.png" width="46%"></p>
+
+> Медиа генерируются из Web UI той же версии прошивки. Старые `demo.gif`, `demo.mp4` и прежние разрозненные скриншоты README больше не использует.
+'''
+          s=s[:start]+block+s[end:]
+          marker='- чтение и изменение разрешённого набора Modbus-регистров;'
+          safety='''- чтение и изменение разрешённого набора Modbus-регистров с проверкой диапазонов и взаимосвязей;
+- полный warning map bit0..20, включая lithium communication и превышение тока разряда;
+- отображение masked и unmasked warning-кодов;
+- подтверждённые R/W `316` (dry contact) и `338` (automatic mains output);
+- регистр `344` помечен reserved и заблокирован для записи;
+- опасные `420/425/426/460/461` не доступны через обычную запись и планировщик;'''
+          if marker in s: s=s.replace(marker,safety,1)
+          p.write_text(s,encoding='utf-8')
+          PY
+
+      - name: Validate README and generated media
+        run: |
+          grep -q 'Текущая версия прошивки: \*\*0.15.7\*\*' README.md
+          grep -q 'ui-v0157-preview.gif' README.md
+          grep -q 'ui-v0157-scheduler-2.png' README.md
           if grep -q 'docs/media/demo.gif' README.md; then exit 1; fi
           if grep -q 'docs/media/demo.mp4' README.md; then exit 1; fi
+          test "$(find docs/media -name 'ui-v0157-*.png' | wc -l)" -eq 14
+          test -s docs/media/ui-v0157-preview.gif
           git diff --check
 
-      - name: Commit README to main
+      - name: Commit v0.15.7 to main
         run: |
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          git commit -m "Make current UI screenshots readable in README"
+          git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino README.md docs/media/ui-v0157-*.png docs/media/ui-v0157-preview.gif
+          git commit -m "Release v0.15.7 warning safety and refresh README media"
           git push origin HEAD:main
