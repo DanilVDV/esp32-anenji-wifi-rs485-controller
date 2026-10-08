@@ -315,6 +315,12 @@ void batteryStatsSave(bool force=false);
 bool adminAuthorized();
 bool haveReg(uint16_t reg);
 void handleEvents();
+bool i2cProbe(uint8_t addr);
+void serviceHallCurrent();
+void handleHallGet();
+void handleHallConfigSet();
+void handleHallZeroCal();
+void handleHallSpanCal();
 
 
 // ---------------- DEVICE / NETWORK SETTINGS ----------------
@@ -508,8 +514,8 @@ HardwareSerial RS485(2);
 WebServer web(80);
 
 
-const char* FW_VERSION = "0.15.8";
-const char* FW_VERSION_PREVIOUS = "0.15.7";
+const char* FW_VERSION = "0.15.9";
+const char* FW_VERSION_PREVIOUS = "0.15.8";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -562,6 +568,25 @@ bool pzemOnline = false;
 float pzemVoltage=NAN, pzemCurrent=NAN, pzemPower=NAN, pzemEnergyKwh=NAN, pzemFrequency=NAN, pzemPf=NAN;
 bool pzemAlarm=false;
 uint32_t pzemUpdatedMs=0, pzemLastPollMs=0, pzemPollOk=0, pzemPollErrors=0;
+
+// Optional PZCT-DC63 Hall DC current sensor via ADS1115 on the shared I2C bus.
+// Address 0 means auto-detect 0x48..0x4B. Default calibration matches the
+// common 100 A version: about 2.5 V at zero and about 20 mV/A.
+const uint8_t ADS1115_ADDR_FIRST=0x48;
+const uint8_t ADS1115_ADDR_LAST=0x4B;
+bool hallEnabled=false;
+bool hallOnline=false;
+uint8_t hallAdsAddress=0;
+uint8_t hallResolvedAddress=0;
+uint8_t hallChannel=0;
+float hallZeroMv=2500.0f;
+float hallSensitivityMvPerA=20.0f;
+bool hallInvert=false;
+float hallInputMv=NAN;
+float hallCurrentA=NAN;
+uint32_t hallUpdatedMs=0;
+uint32_t hallLastPollMs=0;
+const uint32_t HALL_POLL_INTERVAL_MS=1000;
 // PZEM-016 is an energy meter, so a slow poll is preferable to competing with
 // the inverter for the shared half-duplex RS-485 bus.
 const uint32_t PZEM_POLL_INTERVAL_MS = 5000;
@@ -1602,6 +1627,15 @@ void loadPersistentConfig() {
   pzemEnabled = appPrefs.getBool("pzem_en", true);
   uint32_t ps=appPrefs.getUInt("pzem_slave", PZEM_DEFAULT_SLAVE);
   pzemSlave=(ps>=1 && ps<=247)?(uint8_t)ps:PZEM_DEFAULT_SLAVE;
+  hallEnabled = appPrefs.getBool("hall_en", false);
+  uint32_t ha=appPrefs.getUInt("hall_addr", 0);
+  hallAdsAddress=(ha==0 || (ha>=ADS1115_ADDR_FIRST && ha<=ADS1115_ADDR_LAST))?(uint8_t)ha:0;
+  uint32_t hc=appPrefs.getUInt("hall_ch", 0); hallChannel=(hc<=3)?(uint8_t)hc:0;
+  hallZeroMv=appPrefs.getFloat("hall_zero",2500.0f);
+  if(hallZeroMv<0.0f || hallZeroMv>5500.0f) hallZeroMv=2500.0f;
+  hallSensitivityMvPerA=appPrefs.getFloat("hall_sens",20.0f);
+  if(hallSensitivityMvPerA<0.05f || hallSensitivityMvPerA>1000.0f) hallSensitivityMvPerA=20.0f;
+  hallInvert=appPrefs.getBool("hall_inv",false);
   setupApSsid = String("ANENJI-SETUP-") + macSuffix();
 
   // Recovery credentials are intentionally printed to the local serial console.
@@ -1614,6 +1648,51 @@ void loadPersistentConfig() {
   Serial.println(F("================================="));
 }
 
+
+// ---------------- PZCT-DC63 Hall current sensor / ADS1115 ----------------
+uint8_t hallResolveAddress() {
+  if(hallAdsAddress>=ADS1115_ADDR_FIRST && hallAdsAddress<=ADS1115_ADDR_LAST) {
+    if(i2cProbe(hallAdsAddress)) { hallResolvedAddress=hallAdsAddress; return hallResolvedAddress; }
+    hallResolvedAddress=0; return 0;
+  }
+  for(uint8_t a=ADS1115_ADDR_FIRST;a<=ADS1115_ADDR_LAST;a++) {
+    if(i2cProbe(a)) { hallResolvedAddress=a; return a; }
+  }
+  hallResolvedAddress=0; return 0;
+}
+
+bool hallReadMv(float& mv) {
+  uint8_t addr=hallResolveAddress();
+  if(!addr || hallChannel>3) return false;
+  // ADS1115: single-shot, AINx vs GND, PGA +/-6.144 V, 128 SPS, comparator disabled.
+  uint16_t cfg=(uint16_t)(0x8000 | ((uint16_t)(4+hallChannel)<<12) | 0x0100 | (4u<<5) | 0x0003);
+  Wire.beginTransmission(addr); Wire.write((uint8_t)0x01); Wire.write((uint8_t)(cfg>>8)); Wire.write((uint8_t)cfg);
+  if(Wire.endTransmission()!=0) return false;
+  delay(10);
+  Wire.beginTransmission(addr); Wire.write((uint8_t)0x00);
+  if(Wire.endTransmission(false)!=0) return false;
+  if(Wire.requestFrom((int)addr,2)!=2) return false;
+  int16_t raw=(int16_t)(((uint16_t)Wire.read()<<8)|Wire.read());
+  mv=(float)raw*0.1875f; // +/-6.144 V range -> 187.5 uV/LSB
+  return true;
+}
+
+bool hallAverageMv(float& mv, uint8_t samples=6) {
+  if(samples<1) samples=1; if(samples>16) samples=16;
+  float sum=0.0f; uint8_t ok=0;
+  for(uint8_t i=0;i<samples;i++) { float v=0; if(hallReadMv(v)){sum+=v;ok++;} delay(2); }
+  if(ok<((samples+1)/2)) return false;
+  mv=sum/(float)ok; return true;
+}
+
+void serviceHallCurrent() {
+  if(!hallEnabled) { hallOnline=false; hallCurrentA=NAN; hallInputMv=NAN; return; }
+  uint32_t now=millis(); if(hallLastPollMs && now-hallLastPollMs<HALL_POLL_INTERVAL_MS) return; hallLastPollMs=now;
+  float mv=0; if(!hallAverageMv(mv,3)) { hallOnline=false; return; }
+  hallInputMv=mv; hallOnline=true; hallUpdatedMs=now;
+  float a=(mv-hallZeroMv)/hallSensitivityMvPerA; if(hallInvert) a=-a;
+  if(fabsf(a)<0.03f) a=0.0f; hallCurrentA=a;
+}
 
 // ---------------- DS1307/DS3231-common RTC + scheduler ----------------
 uint8_t bcdToDec(uint8_t v) { return (uint8_t)((v >> 4) * 10 + (v & 0x0F)); }
@@ -2456,6 +2535,57 @@ void handleNtpConfigSet() {
   appPrefs.putString("ntp_server",ntpServer); appPrefs.putInt("ntp_utc_min",ntpUtcOffsetMin);
   ntpConfigured=false; ntpEverSynced=false; ntpLastAttemptMs=0;
   String j=String("{\"ok\":true,\"server\":\"")+jsonEscape(ntpServer)+"\",\"utc_offset_min\":"+String(ntpUtcOffsetMin)+"}"; sendJson(200,j);
+}
+
+void handleHallGet() {
+  String j=F("{\"ok\":true");
+  j+=F(",\"enabled\":"); j+=hallEnabled?F("true"):F("false");
+  j+=F(",\"online\":"); j+=hallOnline?F("true"):F("false");
+  j+=F(",\"address\":"); j+=hallAdsAddress;
+  j+=F(",\"resolved_address\":"); if(hallResolvedAddress)j+=hallResolvedAddress;else j+=F("null");
+  j+=F(",\"channel\":"); j+=hallChannel;
+  j+=F(",\"zero_mv\":"); j+=String(hallZeroMv,3);
+  j+=F(",\"sensitivity_mv_per_a\":"); j+=String(hallSensitivityMvPerA,5);
+  j+=F(",\"invert\":"); j+=hallInvert?F("true"):F("false");
+  j+=F(",\"input_mv\":"); if(hallOnline&&!isnan(hallInputMv))j+=String(hallInputMv,3);else j+=F("null");
+  j+=F(",\"current_a\":"); if(hallOnline&&!isnan(hallCurrentA))j+=String(hallCurrentA,3);else j+=F("null");
+  j+=F(",\"age_ms\":"); if(hallUpdatedMs)j+=(millis()-hallUpdatedMs);else j+=F("null"); j+='}'; sendJson(200,j);
+}
+
+void handleHallConfigSet() {
+  if(!adminAuthorized()){sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}"));return;}
+  String body=web.arg("plain");
+  double en=hallEnabled?1:0,addr=hallAdsAddress,ch=hallChannel,zero=hallZeroMv,sens=hallSensitivityMvPerA,inv=hallInvert?1:0;
+  jsonFindNumber(body,"enabled",en); jsonFindNumber(body,"address",addr); jsonFindNumber(body,"channel",ch);
+  jsonFindNumber(body,"zero_mv",zero); jsonFindNumber(body,"sensitivity_mv_per_a",sens); jsonFindNumber(body,"invert",inv);
+  if(!((int)addr==0 || ((int)addr>=ADS1115_ADDR_FIRST && (int)addr<=ADS1115_ADDR_LAST)) || ch<0 || ch>3 || zero<0 || zero>5500 || sens<0.05 || sens>1000) {
+    sendJson(400,F("{\"ok\":false,\"error\":\"Invalid ADS1115/Hall configuration\"}")); return;
+  }
+  hallEnabled=(en!=0); hallAdsAddress=(uint8_t)addr; hallChannel=(uint8_t)ch; hallZeroMv=(float)zero;
+  hallSensitivityMvPerA=(float)sens; hallInvert=(inv!=0); hallResolvedAddress=0; hallLastPollMs=0;
+  appPrefs.putBool("hall_en",hallEnabled); appPrefs.putUInt("hall_addr",hallAdsAddress); appPrefs.putUInt("hall_ch",hallChannel);
+  appPrefs.putFloat("hall_zero",hallZeroMv); appPrefs.putFloat("hall_sens",hallSensitivityMvPerA); appPrefs.putBool("hall_inv",hallInvert);
+  serviceHallCurrent(); sendJson(200,F("{\"ok\":true}"));
+}
+
+void handleHallZeroCal() {
+  if(!adminAuthorized()){sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}"));return;}
+  float mv=0; if(!hallAverageMv(mv,10)){sendJson(503,F("{\"ok\":false,\"error\":\"ADS1115 not responding\"}"));return;}
+  hallZeroMv=mv; appPrefs.putFloat("hall_zero",hallZeroMv); hallLastPollMs=0; serviceHallCurrent();
+  String j=String("{\"ok\":true,\"zero_mv\":")+String(hallZeroMv,3)+"}"; sendJson(200,j);
+}
+
+void handleHallSpanCal() {
+  if(!adminAuthorized()){sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}"));return;}
+  String body=web.arg("plain"); double known=0; if(!jsonFindNumber(body,"current_a",known) || fabs(known)<0.5 || fabs(known)>1000) {
+    sendJson(400,F("{\"ok\":false,\"error\":\"Known current must be between 0.5 and 1000 A (signed)\"}"));return;
+  }
+  float mv=0; if(!hallAverageMv(mv,10)){sendJson(503,F("{\"ok\":false,\"error\":\"ADS1115 not responding\"}"));return;}
+  float signedK=(mv-hallZeroMv)/(float)known; float sens=fabsf(signedK);
+  if(sens<0.05f || sens>1000.0f){sendJson(400,F("{\"ok\":false,\"error\":\"Calibration span is too small or invalid\"}"));return;}
+  hallSensitivityMvPerA=sens; hallInvert=(signedK<0.0f); appPrefs.putFloat("hall_sens",hallSensitivityMvPerA); appPrefs.putBool("hall_inv",hallInvert);
+  hallLastPollMs=0; serviceHallCurrent();
+  String j=String("{\"ok\":true,\"sensitivity_mv_per_a\":")+String(hallSensitivityMvPerA,5)+",\"invert\":"+(hallInvert?"true":"false")+"}"; sendJson(200,j);
 }
 
 void handlePzemConfigSet() {
@@ -3796,6 +3926,28 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 <div class="small" style="margin-top:8px">Тариф T1: 07:00–23:00. T2: 23:00–07:00. После ввода текущих показаний электросчётчика прошивка распределяет прирост энергии PZEM по тарифам и хранит T1/T2 в AT24C32. PZEM-016: 9600 8N1, FC04, регистры 0x0000…0x0009.</div>
 </div>
 
+<div class="card"><h2>PZCT-DC63 · DC ток / ADS1115</h2>
+<div class="grid">
+ <div class="metric"><small>Ток Холла</small><b id="hallA">— A</b></div>
+ <div class="metric"><small>Вход ADS1115</small><b id="hallMv">— mV</b></div>
+ <div class="metric"><small>ADS1115</small><b id="hallAdsState">—</b></div>
+</div>
+<div class="netgrid" style="margin-top:12px">
+ <label><span><input id="hallEnabled" type="checkbox"> включить датчик</span></label>
+ <label>Адрес ADS1115<select id="hallAddr"><option value="0">Авто 0x48…0x4B</option><option value="72">0x48</option><option value="73">0x49</option><option value="74">0x4A</option><option value="75">0x4B</option></select></label>
+ <label>Канал ADS1115<select id="hallChannel"><option value="0">A0</option><option value="1">A1</option><option value="2">A2</option><option value="3">A3</option></select></label>
+ <label>Ноль, mV<input id="hallZeroMv" type="number" step="0.1" min="0" max="5500"></label>
+ <label>Чувствительность, mV/A<input id="hallSens" type="number" step="0.0001" min="0.05" max="1000"></label>
+ <label><span><input id="hallInvert" type="checkbox"> инвертировать направление</span></label>
+</div>
+<div class="toolbar" style="margin-top:10px"><button onclick="hallSave()">Сохранить</button><button onclick="hallNominal(100)">100 A номинал</button><button onclick="hallNominal(300)">300 A</button><button onclick="hallNominal(500)">500 A</button><span id="hallMsg" class="small"></span></div>
+<details style="margin-top:10px"><summary>Калибровка датчика тока</summary>
+ <div class="toolbar" style="margin-top:8px"><button onclick="hallCalZero()">Калибровать ноль</button><label>Эталонный ток, A <input id="hallKnownA" type="number" step="0.1" style="width:110px"></label><button onclick="hallCalSpan()">Калибровать по току</button></div>
+ <div class="small">Сначала отключите ток через проводник и выполните «Калибровать ноль». Затем пропустите известный ток, введите его со знаком и выполните калибровку по току. Параметры сохраняются в NVS ESP32.</div>
+</details>
+<div class="small" style="margin-top:8px">PZCT-DC63 обычно имеет середину около 2.5 В и выход примерно 0.5…4.5 В. Для ADS1115, питаемого от 5 В, используйте двунаправленный преобразователь уровней I²C между ADS1115 и ESP32. Схемы: <code>docs/hall-current-ads1115.md</code>.</div>
+</div>
+
 <div class="card"><h2>Modbus / RS‑485</h2>
 <div class="netgrid">
 <label>Адрес устройства Modbus RTU<input id="modbusSlave" type="number" min="1" max="247" step="1"></label>
@@ -4507,6 +4659,37 @@ async function rtcSyncNtp(){
  }catch(e){$('rtcMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
 }
 
+let hallLoadBusy=false;
+async function hallLoad(force=false){
+ if(hallLoadBusy)return;hallLoadBusy=true;
+ try{const x=await api('/api/hall',{timeoutMs:1800});
+  if($('hallEnabled'))$('hallEnabled').checked=!!x.enabled;
+  if($('hallAddr'))$('hallAddr').value=String(x.address??0);
+  if($('hallChannel'))$('hallChannel').value=String(x.channel??0);
+  if($('hallZeroMv'))$('hallZeroMv').value=Number(x.zero_mv??2500).toFixed(2);
+  if($('hallSens'))$('hallSens').value=Number(x.sensitivity_mv_per_a??20).toFixed(5);
+  if($('hallInvert'))$('hallInvert').checked=!!x.invert;
+  if($('hallA'))$('hallA').textContent=x.current_a==null?'— A':Number(x.current_a).toFixed(2)+' A';
+  if($('hallMv'))$('hallMv').textContent=x.input_mv==null?'— mV':Number(x.input_mv).toFixed(1)+' mV';
+  if($('hallAdsState'))$('hallAdsState').textContent=x.online?('ONLINE · 0x'+Number(x.resolved_address).toString(16).toUpperCase()+' / A'+x.channel):'OFFLINE';
+ }catch(e){if($('hallAdsState'))$('hallAdsState').textContent='OFFLINE'}finally{hallLoadBusy=false}
+}
+function hallNominal(a){if($('hallSens'))$('hallSens').value=(2000/Number(a)).toFixed(5);if($('hallMsg'))$('hallMsg').textContent='Номинал '+a+' A; сохраните или выполните двухточечную калибровку.';}
+async function hallSave(){
+ const body={enabled:$('hallEnabled').checked?1:0,address:Number($('hallAddr').value),channel:Number($('hallChannel').value),zero_mv:Number($('hallZeroMv').value),sensitivity_mv_per_a:Number($('hallSens').value),invert:$('hallInvert').checked?1:0};
+ try{const h=await verifiedAdminHeaders('hallMsg');if(!h)return;await api('/api/hall/config',{method:'POST',headers:h,body:JSON.stringify(body)});$('hallMsg').innerHTML='<span class=ok>Сохранено</span>';setTimeout(()=>hallLoad(true),300);}catch(e){$('hallMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
+}
+async function hallCalZero(){
+ if(!confirm('Убедитесь, что через датчик сейчас не течёт ток. Записать текущее напряжение как ноль?'))return;
+ try{const h=await verifiedAdminHeaders('hallMsg');if(!h)return;const r=await api('/api/hall/cal/zero',{method:'POST',headers:h,body:'{}'});$('hallMsg').innerHTML='<span class=ok>Ноль: '+Number(r.zero_mv).toFixed(2)+' mV</span>';setTimeout(()=>hallLoad(true),250);}catch(e){$('hallMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
+}
+async function hallCalSpan(){
+ const current_a=Number($('hallKnownA').value);if(!Number.isFinite(current_a)||Math.abs(current_a)<0.5){$('hallMsg').innerHTML='<span class=bad>Введите эталонный ток не менее 0.5 A</span>';return;}
+ if(!confirm('Использовать '+current_a+' A как эталон для калибровки?'))return;
+ try{const h=await verifiedAdminHeaders('hallMsg');if(!h)return;const r=await api('/api/hall/cal/span',{method:'POST',headers:h,body:JSON.stringify({current_a})});$('hallMsg').innerHTML='<span class=ok>Калибровка: '+Number(r.sensitivity_mv_per_a).toFixed(5)+' mV/A</span>';setTimeout(()=>hallLoad(true),250);}catch(e){$('hallMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
+}
+setTimeout(()=>hallLoad(true),1200);setInterval(()=>hallLoad(false),3000);
+
 async function pzemSave(){
  const address=Number($('pzemAddr').value), enabled=$('pzemEnabled').checked?1:0;
  try{const h=await verifiedAdminHeaders('pzemState');if(!h)return;await api('/api/pzem/config',{method:'POST',headers:h,body:JSON.stringify({address,enabled})});$('pzemState').innerHTML='<span class=ok>Сохранено</span>';setTimeout(()=>statusLoad(true),500);}catch(e){$('pzemState').innerHTML='<span class=bad>'+e.message+'</span>'}
@@ -4761,6 +4944,10 @@ void setupWeb() {
   web.on("/api/pzem/config", HTTP_POST, handlePzemConfigSet);
   web.on("/api/pzem/tariff", HTTP_POST, handlePzemTariffSet);
   web.on("/api/pzem/energy/reset", HTTP_POST, handlePzemEnergyReset);
+  web.on("/api/hall", HTTP_GET, handleHallGet);
+  web.on("/api/hall/config", HTTP_POST, handleHallConfigSet);
+  web.on("/api/hall/cal/zero", HTTP_POST, handleHallZeroCal);
+  web.on("/api/hall/cal/span", HTTP_POST, handleHallSpanCal);
   web.on("/api/ota/status", HTTP_GET, handleOtaStatus);
   web.on("/api/ota/unlock", HTTP_POST, handleOtaUnlock);
   web.on("/api/ota/update", HTTP_POST, handleOtaUploadDone, handleOtaUpload);
@@ -4996,6 +5183,7 @@ void loop() {
   if(otaRestartPending && (int32_t)(millis()-otaRestartAtMs)>=0){ delay(50); ESP.restart(); }
   serviceBootButton();
   serviceWifiWatchdog();
+  serviceHallCurrent();
   serviceHeapWatchdog();
   serviceNtpRtcSync();
 
