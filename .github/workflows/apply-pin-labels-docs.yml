@@ -1,0 +1,179 @@
+name: Apply ESP32 pin labels docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-pin-labels-docs.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Update README and wiring docs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          readme = Path('README.md')
+          s = readme.read_text(encoding='utf-8')
+
+          old = '''### ESP32 ↔ RS‑485 трансивер
+
+| ESP32 | RS‑485 модуль | Назначение |
+|---|---|---|
+| GPIO16 | RO | UART2 RX |
+| GPIO17 | DI | UART2 TX |
+| GPIO4 | DE + /RE | управление направлением half‑duplex |
+| GND | GND | общий провод |
+| — | A / B | линия RS‑485 к инвертору и, при использовании, PZEM‑016 |
+
+Параметры UART в прошивке: **9600 baud, 8N1**.
+
+### ESP32 ↔ RTC / EEPROM
+
+| ESP32 | I²C | Устройство |
+|---|---|---|
+| GPIO21 | SDA | DS1307/DS3231 + AT24C32 |
+| GPIO22 | SCL | DS1307/DS3231 + AT24C32 |
+| GND | GND | общий провод |
+'''
+          new = '''### ESP32 ↔ RS‑485 трансивер
+
+На разных ESP32 DevKit одна и та же ножка может быть подписана на плате как `4`, `IO4`, `D4` и т. п. **Ориентируйтесь прежде всего на номер GPIO**; колонка «Маркировка на плате» показывает наиболее распространённые варианты надписей.
+
+| Сигнал ESP32 | GPIO | Маркировка на плате (типично) | RS‑485 модуль | Назначение |
+|---|---:|---|---|---|
+| UART2 RX | **GPIO16** | `RX2` / `IO16` / `16` / `D16` | `RO` | приём данных от трансивера |
+| UART2 TX | **GPIO17** | `TX2` / `IO17` / `17` / `D17` | `DI` | передача данных в трансивер |
+| Direction | **GPIO4** | `D4` / `IO4` / `4` | `DE + /RE` | управление направлением half‑duplex |
+| Питание | — | **`3V3` / `3.3V`** | `VCC` | питание модуля от 3.3 V |
+| Земля | — | **`GND`** | `GND` | общий провод |
+| RS‑485 | — | — | `A / B` | линия к инвертору и, при использовании, PZEM‑016 |
+
+> В этой сборке внешние низковольтные модули питаются от **3.3 V**. Не используйте `VIN/5V` как питание модулей этой схемы. Для конкретного RS‑485-модуля всё равно проверьте, что он действительно рассчитан на питание и логические уровни 3.3 V.
+
+Параметры UART в прошивке: **9600 baud, 8N1**.
+
+<p align="center">
+  <img src="docs/media/esp32-pin-labels-3v3.svg" alt="ESP32 DevKit pin labels for ANENJI controller" width="900">
+</p>
+
+### ESP32 ↔ RTC / EEPROM
+
+| Сигнал ESP32 | GPIO | Маркировка на плате (типично) | I²C модуль |
+|---|---:|---|---|
+| SDA | **GPIO21** | `SDA` / `D21` / `IO21` / `21` | `SDA` DS1307/DS3231 + AT24C32 |
+| SCL | **GPIO22** | `SCL` / `D22` / `IO22` / `22` | `SCL` DS1307/DS3231 + AT24C32 |
+| Питание | — | **`3V3` / `3.3V`** | `VCC` |
+| Земля | — | **`GND`** | `GND` |
+'''
+          if old not in s:
+              raise SystemExit('README wiring block not found')
+          s = s.replace(old, new, 1)
+          readme.write_text(s, encoding='utf-8')
+
+          wiring = Path('docs/wiring.md')
+          w = wiring.read_text(encoding='utf-8')
+          old2 = '''| Сигнал | GPIO | Куда подключать |
+|---|---:|---|
+| RX2 | 16 | `RO` RS‑485 transceiver |
+| TX2 | 17 | `DI` RS‑485 transceiver |
+| Direction | 4 | объединённые `DE` и `/RE` |
+| GND | — | общий GND |
+'''
+          new2 = '''| Сигнал | GPIO | Маркировка на ESP32 DevKit (типично) | Куда подключать |
+|---|---:|---|---|
+| RX2 | **16** | `RX2` / `IO16` / `16` / `D16` | `RO` RS‑485 transceiver |
+| TX2 | **17** | `TX2` / `IO17` / `17` / `D17` | `DI` RS‑485 transceiver |
+| Direction | **4** | `D4` / `IO4` / `4` | объединённые `DE` и `/RE` |
+| 3.3 V | — | `3V3` / `3.3V` | `VCC` RS‑485 transceiver |
+| GND | — | `GND` | общий GND |
+'''
+          if old2 not in w:
+              raise SystemExit('docs/wiring RS485 table not found')
+          w = w.replace(old2, new2, 1)
+          w = w.replace('''GPIO17 (TX2) ----------> DI
+GPIO16 (RX2) <---------- RO
+GPIO4          --------> DE + /RE
+GND            --------> GND
+''','''GPIO17 / TX2 / IO17 ----------> DI
+GPIO16 / RX2 / IO16 <---------- RO
+GPIO4 / D4 / IO4     --------> DE + /RE
+3V3 / 3.3V           --------> VCC
+GND                   --------> GND
+''',1)
+          w = w.replace('''ESP32 GPIO21 (SDA) ----+---- DS1307/DS3231 SDA
+                       +---- AT24C32 SDA
+ESP32 GPIO22 (SCL) ----+---- DS1307/DS3231 SCL
+                       +---- AT24C32 SCL
+GND -------------------+---- common GND
+''','''ESP32 GPIO21 / SDA / D21 ----+---- DS1307/DS3231 SDA
+                                  +---- AT24C32 SDA
+ESP32 GPIO22 / SCL / D22 --------+---- DS1307/DS3231 SCL
+                                  +---- AT24C32 SCL
+ESP32 3V3 ------------------------+---- VCC всех I²C-модулей
+ESP32 GND ------------------------+---- общий GND
+''',1)
+          w = w.replace('''- используйте трансивер, безопасный для логики 3.3 В ESP32;
+''','''- в этой сборке RS‑485-трансивер питается от **3.3 V (`3V3`)**; используйте модуль, рассчитанный на такое питание и логические уровни ESP32;
+''',1)
+          w += '''\n## 5. Быстрая шпаргалка по надписям на ESP32 DevKit\n\n| Функция в проекте | GPIO | Что искать на плате |\n|---|---:|---|\n| RS‑485 RX | 16 | `RX2`, `IO16`, `16`, иногда `D16` |\n| RS‑485 TX | 17 | `TX2`, `IO17`, `17`, иногда `D17` |\n| RS‑485 DE+/RE | 4 | `D4`, `IO4`, `4` |\n| I²C SDA | 21 | `SDA`, `D21`, `IO21`, `21` |\n| I²C SCL | 22 | `SCL`, `D22`, `IO22`, `22` |\n| BOOT | 0 | `BOOT`, `D0`, `IO0`, `0` |\n| Питание модулей | — | `3V3`, `3.3V` |\n| Общий провод | — | `GND` |\n\n> У разных DevKit подписи отличаются. Если на вашей плате нет `Dxx`, используйте число `GPIOxx`/`IOxx`: например, GPIO4 — это та же ножка, которую некоторые платы подписывают `D4`.\n'''
+          wiring.write_text(w, encoding='utf-8')
+
+          hall = Path('docs/hall-current-ads1115.md')
+          h = hall.read_text(encoding='utf-8')
+          start = h.find('Типичные PZCT-DC63')
+          end = h.find('## Проводник через датчик')
+          if start < 0 or end < 0:
+              raise SystemExit('hall power section not found')
+          repl = '''В этой сборке низковольтная часть выполнена от **3.3 V**: ADS1115 и используемый модуль PZCT-DC63 подключаются к `3V3` ESP32, земля общая. Используйте только тот вариант PZCT-DC63/платы-преобразователя, для которого питание 3.3 V допустимо по маркировке или документации конкретного экземпляра.\n\n## Подключение 3.3 V\n\n| ESP32 DevKit | Маркировка на плате | ADS1115 / PZCT |\n|---|---|---|\n| 3.3 V | `3V3` / `3.3V` | `VDD/VCC` обоих модулей |\n| GPIO21 | `SDA` / `D21` / `IO21` | ADS1115 `SDA` |\n| GPIO22 | `SCL` / `D22` / `IO22` | ADS1115 `SCL` |\n| GND | `GND` | общий `GND` |\n| — | — | PZCT `OUT` → ADS1115 `A0` (либо A1/A2/A3) |\n\n```text\nESP32 DevKit                  ADS1115                    PZCT-DC63\n-----------                   -------                    ---------\n3V3 / 3.3V ------------------> VDD ---------------------> VCC\nGND --------------------------> GND ---------------------> GND\nGPIO21 / SDA / D21 ----------> SDA\nGPIO22 / SCL / D22 ----------> SCL\n                               A0 <----------------------- OUT\n```\n\nПоскольку и ESP32, и ADS1115 работают в одной 3.3-вольтовой логике, отдельный I²C level shifter в этой схеме не требуется. Калибровка прошивки использует фактическое напряжение ADS1115, поэтому точный ноль и чувствительность определяются на установленном датчике.\n\n'''
+          h = h[:start] + repl + h[end:]
+          hall.write_text(h, encoding='utf-8')
+          PY
+
+          cat > docs/media/esp32-pin-labels-3v3.svg <<'SVG'
+          <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650">
+            <style>
+              text{font-family:Arial,sans-serif;fill:#111827} .h{font-size:30px;font-weight:700}.t{font-size:22px}.s{font-size:18px}.box{fill:#f8fafc;stroke:#334155;stroke-width:2}.pin{fill:#fff;stroke:#64748b;stroke-width:2}.line{stroke:#334155;stroke-width:3;fill:none}
+            </style>
+            <text x="600" y="45" text-anchor="middle" class="h">ESP32 DevKit — используемые выводы проекта (питание модулей 3.3 V)</text>
+            <rect x="410" y="90" width="380" height="500" rx="28" class="box"/>
+            <text x="600" y="135" text-anchor="middle" class="h">ESP32 DevKit</text>
+            <text x="600" y="170" text-anchor="middle" class="s">GPIO — главный ориентир; Dxx/IOxx/RX2/TX2 зависят от платы</text>
+
+            <rect x="445" y="215" width="310" height="48" rx="10" class="pin"/><text x="600" y="247" text-anchor="middle" class="t">GPIO16 · RX2 · IO16 · D16</text>
+            <rect x="445" y="275" width="310" height="48" rx="10" class="pin"/><text x="600" y="307" text-anchor="middle" class="t">GPIO17 · TX2 · IO17 · D17</text>
+            <rect x="445" y="335" width="310" height="48" rx="10" class="pin"/><text x="600" y="367" text-anchor="middle" class="t">GPIO4 · D4 · IO4</text>
+            <rect x="445" y="395" width="310" height="48" rx="10" class="pin"/><text x="600" y="427" text-anchor="middle" class="t">GPIO21 · SDA · D21 · IO21</text>
+            <rect x="445" y="455" width="310" height="48" rx="10" class="pin"/><text x="600" y="487" text-anchor="middle" class="t">GPIO22 · SCL · D22 · IO22</text>
+            <rect x="445" y="515" width="145" height="48" rx="10" class="pin"/><text x="517" y="547" text-anchor="middle" class="t">3V3</text>
+            <rect x="610" y="515" width="145" height="48" rx="10" class="pin"/><text x="682" y="547" text-anchor="middle" class="t">GND</text>
+
+            <text x="60" y="235" class="t">RS‑485 RO → RX2</text><path d="M340 235 H445" class="line"/>
+            <text x="60" y="295" class="t">RS‑485 DI ← TX2</text><path d="M340 295 H445" class="line"/>
+            <text x="60" y="355" class="t">RS‑485 DE+/RE</text><path d="M340 355 H445" class="line"/>
+            <text x="820" y="415" class="t">I²C SDA → RTC / EEPROM / ADS1115</text><path d="M755 415 H805" class="line"/>
+            <text x="820" y="475" class="t">I²C SCL → RTC / EEPROM / ADS1115</text><path d="M755 475 H805" class="line"/>
+            <text x="820" y="535" class="t">VCC всех модулей: 3.3 V</text><path d="M755 535 H805" class="line"/>
+            <text x="820" y="570" class="t">Общий GND</text><path d="M755 555 H805" class="line"/>
+          </svg>
+          SVG
+
+      - name: Commit documentation
+        shell: bash
+        run: |
+          git config user.name ChatGPT
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add README.md docs/wiring.md docs/hall-current-ads1115.md docs/media/esp32-pin-labels-3v3.svg
+          git commit -m "Clarify ESP32 pin labels and 3.3V module wiring"
+          git push origin HEAD:main
