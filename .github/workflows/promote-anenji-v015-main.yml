@@ -1,4 +1,4 @@
-name: Promote datalogger v0.15.2 to main
+name: Promote cleanup v0.15.3 to main
 
 on:
   push:
@@ -28,10 +28,10 @@ jobs:
           path: patchsrc
           fetch-depth: 1
 
-      - name: Apply datalogger stability patch
-        run: python3 patchsrc/tools/apply_datalogger_v0_15_2.py base
+      - name: Apply cleanup patch
+        run: python3 patchsrc/tools/apply_cleanup_v0_15_3.py base
 
-      - name: Validate firmware markers and UI JavaScript
+      - name: Validate cleanup and embedded JavaScript
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -39,25 +39,17 @@ jobs:
           p=Path('base/firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
           s=p.read_text(encoding='utf-8')
           req=[
-            'const char* FW_VERSION = "0.15.2";',
-            'if (otaInProgress || otaRestartPending || dataloggerServiceMode) return;',
-            'if (setupMode || dataloggerServiceMode || wifiSsid.length() == 0)',
-            '} else if (!dataloggerServiceMode && WiFi.status() != WL_CONNECTED && wifiSsid.length()) {',
-            'dataloggerServiceMode=true;wifiDisconnectedSinceMs=0;inverterOfflineSinceMs=0;',
-            "dlReq('/api/datalogger/service-ap/start')",
-            "dlReq('/api/datalogger/restore')",
-            'handleDataloggerSetParam',
-            '/api/datalogger/info'
+            'const char* FW_VERSION = "0.15.3";',
+            'data-pzem-overview',
+            'const pzemOverviewVisible=!!pz.online;',
+            "document.querySelectorAll('[data-pzem-overview]')",
+            'if(!pzemOverviewVisible)hidePzemHouseFlow();'
           ]
           missing=[x for x in req if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
-          if 'void handleDataloggerSetParam(){\n  if(!adminAuthorized())' not in s:
-            raise SystemExit('dangerous datalogger writes must remain admin-protected')
-          for fn in ['handleDataloggerServiceApStart','handleDataloggerConnect','handleDataloggerRestore']:
-            pos=s.find('void '+fn+'(){')
-            if pos<0: raise SystemExit(fn+' missing')
-            body=s[pos:s.find('\n}',pos)+2]
-            if 'adminAuthorized()' in body: raise SystemExit(fn+' still requires admin')
+          forbidden=['WiFiUdp.h','DATALOGGER_UDP_PORT','dataloggerServiceMode','handleDatalogger','/api/datalogger/','<h2>Datalogger</h2>','async function dlReq']
+          found=[x for x in forbidden if x in s]
+          if found: raise SystemExit('Datalogger leftovers: '+repr(found))
           m=re.search(r'<script>(.*?)</script>',s,re.S)
           if not m: raise SystemExit('embedded JS not found')
           Path('/tmp/ui.js').write_text(m.group(1),encoding='utf-8')
@@ -71,5 +63,5 @@ jobs:
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
-          git commit -m "Stabilize datalogger service Wi-Fi and watchdog behavior"
+          git commit -m "Remove datalogger controls and hide absent PZEM overview"
           git push origin HEAD:main
