@@ -33,15 +33,26 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
+
+          # Remove the obsolete NTP-UI replacement from the core patcher. The
+          # current firmware already has the correct authorized /api/rtc/ntp UI.
           p=Path('patchsrc/tools/apply_optional_clock_v0_15_5.py')
           s=p.read_text(encoding='utf-8')
-          # The original v0.15.5 patcher carried a UI-only rtcSyncNtp replacement
-          # based on an obsolete JS function order. The dedicated UI fixer below
-          # owns that function now, so remove only the obsolete patch operation.
           pat=r"sub_once\(r'async function rtcSyncNtp\\\(\\\)\\\{\.\*\?\(\?=\\nasync function ntpSave\\\(\\\)\\\{\)',.*?'NTP UI sync', re\.S\)\n"
           s2,n=re.subn(pat,'',s,count=1,flags=re.S)
           if n!=1: raise SystemExit(f'obsolete NTP UI patch removal failed: {n}')
           p.write_text(s2,encoding='utf-8')
+
+          # The UI fixer only needs rtcLoad() and browser-time sync. Keep the
+          # existing rtcSyncNtp() intact to avoid replacing a function that is
+          # already correct in main.
+          q=Path('patchsrc/tools/fix_optional_clock_ui_v0_15_5.py')
+          u=q.read_text(encoding='utf-8')
+          marker="sub_once(r'async function rtcSyncNtp"
+          i=u.find(marker)
+          j=u.find('\np.write_text', i)
+          if i<0 or j<0: raise SystemExit('rtcSyncNtp fixer block not found')
+          q.write_text(u[:i]+u[j:],encoding='utf-8')
           PY
           python3 patchsrc/tools/apply_optional_clock_v0_15_5.py base
           python3 patchsrc/tools/fix_optional_clock_ui_v0_15_5.py base
