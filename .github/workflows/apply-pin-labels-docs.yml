@@ -1,4 +1,5 @@
 name: Apply ESP32 pin labels docs
+# trigger after workflow creation
 
 on:
   push:
@@ -150,7 +151,6 @@ ESP32 GND ------------------------+---- общий GND
             <rect x="410" y="90" width="380" height="500" rx="28" class="box"/>
             <text x="600" y="135" text-anchor="middle" class="h">ESP32 DevKit</text>
             <text x="600" y="170" text-anchor="middle" class="s">GPIO — главный ориентир; Dxx/IOxx/RX2/TX2 зависят от платы</text>
-
             <rect x="445" y="215" width="310" height="48" rx="10" class="pin"/><text x="600" y="247" text-anchor="middle" class="t">GPIO16 · RX2 · IO16 · D16</text>
             <rect x="445" y="275" width="310" height="48" rx="10" class="pin"/><text x="600" y="307" text-anchor="middle" class="t">GPIO17 · TX2 · IO17 · D17</text>
             <rect x="445" y="335" width="310" height="48" rx="10" class="pin"/><text x="600" y="367" text-anchor="middle" class="t">GPIO4 · D4 · IO4</text>
@@ -158,7 +158,6 @@ ESP32 GND ------------------------+---- общий GND
             <rect x="445" y="455" width="310" height="48" rx="10" class="pin"/><text x="600" y="487" text-anchor="middle" class="t">GPIO22 · SCL · D22 · IO22</text>
             <rect x="445" y="515" width="145" height="48" rx="10" class="pin"/><text x="517" y="547" text-anchor="middle" class="t">3V3</text>
             <rect x="610" y="515" width="145" height="48" rx="10" class="pin"/><text x="682" y="547" text-anchor="middle" class="t">GND</text>
-
             <text x="60" y="235" class="t">RS‑485 RO → RX2</text><path d="M340 235 H445" class="line"/>
             <text x="60" y="295" class="t">RS‑485 DI ← TX2</text><path d="M340 295 H445" class="line"/>
             <text x="60" y="355" class="t">RS‑485 DE+/RE</text><path d="M340 355 H445" class="line"/>
