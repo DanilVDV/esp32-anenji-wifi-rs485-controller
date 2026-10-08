@@ -39,31 +39,37 @@
 
 ## Демонстрация Web UI
 
-Короткое превью актуального интерфейса **v0.15.7**:
+Короткое превью актуального интерфейса **v0.15.7** — кадры переключаются медленнее, чтобы интерфейс можно было рассмотреть:
 
 <p align="center"><img src="docs/media/ui-v0157-preview.gif" alt="ANENJI ESP32 Web UI v0.15.7 preview" width="900"></p>
 
-Скриншоты сгруппированы по страницам интерфейса. Для каждой страницы оставлены только 2–3 характерных кадра.
+Для каждой страницы показаны **2 полных скриншота без обрезки содержимого**: desktop и mobile. Так видна вся страница целиком, а не только случайный участок viewport.
 
 ### Обзор
-<p align="center"><img src="docs/media/ui-v0157-overview-1.png" width="46%"> <img src="docs/media/ui-v0157-overview-2.png" width="46%"></p>
+<p align="center"><img src="docs/media/ui-v0157-overview-1.png" width="95%"></p>
+<p align="center"><img src="docs/media/ui-v0157-overview-2.png" width="48%"></p>
 
 ### Батарея
-<p align="center"><img src="docs/media/ui-v0157-battery-1.png" width="31%"> <img src="docs/media/ui-v0157-battery-2.png" width="31%"> <img src="docs/media/ui-v0157-battery-3.png" width="31%"></p>
+<p align="center"><img src="docs/media/ui-v0157-battery-1.png" width="95%"></p>
+<p align="center"><img src="docs/media/ui-v0157-battery-2.png" width="48%"></p>
 
 ### Настройки
-<p align="center"><img src="docs/media/ui-v0157-settings-1.png" width="31%"> <img src="docs/media/ui-v0157-settings-2.png" width="31%"> <img src="docs/media/ui-v0157-settings-3.png" width="31%"></p>
+<p align="center"><img src="docs/media/ui-v0157-settings-1.png" width="95%"></p>
+<p align="center"><img src="docs/media/ui-v0157-settings-2.png" width="48%"></p>
 
 ### Планировщик
-<p align="center"><img src="docs/media/ui-v0157-scheduler-1.png" width="46%"> <img src="docs/media/ui-v0157-scheduler-2.png" width="46%"></p>
+<p align="center"><img src="docs/media/ui-v0157-scheduler-1.png" width="95%"></p>
+<p align="center"><img src="docs/media/ui-v0157-scheduler-2.png" width="48%"></p>
 
 ### Сеть
-<p align="center"><img src="docs/media/ui-v0157-network-1.png" width="46%"> <img src="docs/media/ui-v0157-network-2.png" width="46%"></p>
+<p align="center"><img src="docs/media/ui-v0157-network-1.png" width="95%"></p>
+<p align="center"><img src="docs/media/ui-v0157-network-2.png" width="48%"></p>
 
 ### Сервис
-<p align="center"><img src="docs/media/ui-v0157-service-1.png" width="46%"> <img src="docs/media/ui-v0157-service-2.png" width="46%"></p>
+<p align="center"><img src="docs/media/ui-v0157-service-1.png" width="95%"></p>
+<p align="center"><img src="docs/media/ui-v0157-service-2.png" width="48%"></p>
 
-> Медиа генерируются из Web UI той же версии прошивки. Старые `demo.gif`, `demo.mp4` и прежние разрозненные скриншоты README больше не использует.
+> Скриншоты генерируются из Web UI той же версии прошивки. README больше не использует старые `demo.gif`, `demo.mp4` и прежние обрезанные кадры.
 
 ## Возможности
 
