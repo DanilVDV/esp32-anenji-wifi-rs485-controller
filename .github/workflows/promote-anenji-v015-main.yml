@@ -1,4 +1,4 @@
-name: README promotion test
+name: Promote readable README layout
 
 on:
   push:
@@ -19,7 +19,55 @@ jobs:
         with:
           ref: main
           fetch-depth: 1
-      - name: Validate checkout
+
+      - name: Replace stale README media layout
         run: |
-          test -f README.md
-          git status --short
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('README.md')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('Версия исходной прошивки: **0.14.31**.', 'Текущая версия прошивки: **0.15.6**.')
+          section = s.index('## Демонстрация Web UI')
+          shots = s.index('### Скриншоты', section)
+          s = s[:section] + '''## Демонстрация Web UI
+
+Ниже показаны актуальные экраны Web UI **v0.15.6**. Старые `demo.gif` и `demo.mp4` больше не используются в README.
+
+### Скриншоты
+
+''' + s[shots + len('### Скриншоты\n\n'):]
+          table_start = s.index('<table>', section)
+          table_end = s.index('</table>', table_start) + len('</table>')
+          gallery = '''### Обзор / энергетическая схема
+<p align="center"><a href="docs/media/dashboard.webp"><img src="docs/media/dashboard.webp" alt="Обзор и энергетическая схема" width="900"></a></p>
+
+### Статистика аккумулятора
+<p align="center"><a href="docs/media/battery-stats.webp"><img src="docs/media/battery-stats.webp" alt="Статистика аккумулятора" width="900"></a></p>
+
+### Время / Планировщик
+<p align="center"><a href="docs/media/rtc-scheduler.webp"><img src="docs/media/rtc-scheduler.webp" alt="Время и планировщик" width="900"></a></p>
+
+### Wi-Fi / сеть ESP32 и Modbus / RS-485
+<p align="center"><a href="docs/media/network-modbus.webp"><img src="docs/media/network-modbus.webp" alt="Сеть и Modbus" width="900"></a></p>
+
+### Сервис / PZEM-016 / OTA
+<p align="center"><a href="docs/media/service-pzem-ota.webp"><img src="docs/media/service-pzem-ota.webp" alt="Сервис PZEM OTA" width="900"></a></p>'''
+          s = s[:table_start] + gallery + s[table_end:]
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Validate README
+        run: |
+          grep -q 'Текущая версия прошивки: \*\*0.15.6\*\*' README.md
+          grep -q 'width="900"' README.md
+          if grep -q 'docs/media/demo.gif' README.md; then exit 1; fi
+          if grep -q 'docs/media/demo.mp4' README.md; then exit 1; fi
+          git diff --check
+
+      - name: Commit README to main
+        run: |
+          git config user.name "ChatGPT"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "Make current UI screenshots readable in README"
+          git push origin HEAD:main
