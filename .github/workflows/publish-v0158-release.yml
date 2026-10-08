@@ -1,0 +1,76 @@
+name: Publish v0.15.8 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0158-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v0.15.8 source
+        uses: actions/checkout@v4
+        with:
+          ref: 85fcefd1d7532b3c5155a677ac606e2b9b015466
+          fetch-depth: 0
+
+      - name: Verify firmware version
+        run: |
+          grep -F 'const char* FW_VERSION = "0.15.8";' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+
+      - name: Validate embedded JavaScript
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino').read_text(encoding='utf-8')
+          m=re.search(r'R"HTML\((.*?)\)HTML"',s,re.S)
+          if not m: raise SystemExit('Embedded HTML block not found')
+          scripts=re.findall(r'<script>(.*?)</script>',m.group(1),re.S)
+          if not scripts: raise SystemExit('Embedded JavaScript not found')
+          Path('/tmp/embedded.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/embedded.js
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile v0.15.8
+        run: |
+          mkdir -p build/anenji
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir build/anenji \
+            firmware/ANENJI_ESP32_Controller
+          cp build/anenji/ANENJI_ESP32_Controller.ino.bin build/ANENJI_ESP32_Controller-v0.15.8.bin
+          cp build/anenji/ANENJI_ESP32_Controller.ino.bootloader.bin build/ANENJI_ESP32_Controller-v0.15.8-bootloader.bin
+          cp build/anenji/ANENJI_ESP32_Controller.ino.partitions.bin build/ANENJI_ESP32_Controller-v0.15.8-partitions.bin
+          (cd build && sha256sum ANENJI_ESP32_Controller-v0.15.8*.bin > SHA256SUMS-v0.15.8.txt)
+
+      - name: Create v0.15.8 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.15.8 >/dev/null 2>&1; then
+            echo 'Release v0.15.8 already exists' >&2
+            exit 1
+          fi
+          gh release create v0.15.8 \
+            --target 85fcefd1d7532b3c5155a677ac606e2b9b015466 \
+            --title 'ANENJI ESP32 v0.15.8' \
+            --notes 'Previous stable firmware release v0.15.8. Adds dated inverter event log. Built automatically from commit 85fcefd1d7532b3c5155a677ac606e2b9b015466.' \
+            build/ANENJI_ESP32_Controller-v0.15.8.bin \
+            build/ANENJI_ESP32_Controller-v0.15.8-bootloader.bin \
+            build/ANENJI_ESP32_Controller-v0.15.8-partitions.bin \
+            build/SHA256SUMS-v0.15.8.txt
