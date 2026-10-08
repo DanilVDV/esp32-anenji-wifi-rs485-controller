@@ -1,4 +1,4 @@
-name: Promote ANENJI v0.15.7
+name: Promote ANENJI v0.15.8
 
 on:
   push:
@@ -6,9 +6,7 @@ on:
       - chatgpt/anenji-alerts-v0.15.0
     paths:
       - .github/workflows/promote-anenji-v015-main.yml
-      - tools/promote_v0157.py
-      - tools/render_readme_ui_v0157.js
-      - tools/refresh_readme_media_v0157.py
+      - tools/promote_v0158.py
 
 permissions:
   contents: write
@@ -23,16 +21,17 @@ jobs:
           ref: main
           fetch-depth: 1
 
-      - name: Load v0.15.7 tools
+      - name: Load v0.15.8 patch
         run: |
           git fetch origin chatgpt/anenji-alerts-v0.15.0
-          git show origin/chatgpt/anenji-alerts-v0.15.0:tools/promote_v0157.py > /tmp/promote_v0157.py
-          git show origin/chatgpt/anenji-alerts-v0.15.0:tools/render_readme_ui_v0157.js > /tmp/render_readme_ui_v0157.js
-          git show origin/chatgpt/anenji-alerts-v0.15.0:tools/refresh_readme_media_v0157.py > /tmp/refresh_readme_media_v0157.py
+          git show origin/chatgpt/anenji-alerts-v0.15.0:tools/promote_v0158.py > /tmp/promote_v0158.py
 
-      - name: Validate firmware and embedded JavaScript
+      - name: Patch firmware
+        run: python3 /tmp/promote_v0158.py patch
+
+      - name: Validate firmware and JavaScript
         run: |
-          python3 /tmp/promote_v0157.py validate
+          python3 /tmp/promote_v0158.py validate
           node --check /tmp/embedded.js
 
       - name: Set up Arduino CLI
@@ -46,30 +45,15 @@ jobs:
       - name: Compile ESP32 firmware
         run: arduino-cli compile --fqbn esp32:esp32:esp32 firmware/ANENJI_ESP32_Controller
 
-      - name: Install README renderer dependencies
+      - name: Update README text
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq imagemagick
-          cd /tmp
-          npm init -y >/dev/null 2>&1
-          npm install --silent playwright-core
-
-      - name: Render full-page Web UI media
-        run: node /tmp/render_readme_ui_v0157.js
-
-      - name: Refresh README media section
-        run: |
-          python3 /tmp/refresh_readme_media_v0157.py
+          python3 /tmp/promote_v0158.py readme
           git diff --check
 
-      - name: Commit README media refresh
+      - name: Commit v0.15.8
         run: |
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A README.md docs/media
-          if git diff --cached --quiet; then
-            echo 'No changes to commit'
-          else
-            git commit -m "Use full-page screenshots and slower UI preview"
-            git push origin HEAD:main
-          fi
+          git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino README.md
+          git commit -m "Add dated inverter event log"
+          git push origin HEAD:main
