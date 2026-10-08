@@ -1,0 +1,136 @@
+name: Update README installation guide
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/update-readme-installation.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Update README
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('README.md')
+          s = p.read_text(encoding='utf-8')
+
+          new_install = r'''## Первая установка и прошивка
+
+### 1. Установить Arduino IDE и поддержку ESP32
+
+Для первой прошивки наиболее простой и проверяемый способ — **USB + Arduino IDE 2.x**.
+
+1. Установите **Arduino IDE 2.x** с официального сайта Arduino.
+2. Откройте **File → Preferences / Файл → Настройки**.
+3. В поле **Additional Boards Manager URLs / Дополнительные ссылки для менеджера плат** добавьте:
+
+```text
+https://espressif.github.io/arduino-esp32/package_esp32_index.json
+```
+
+4. Откройте **Tools → Board → Boards Manager / Инструменты → Плата → Менеджер плат**.
+5. Найдите **esp32 by Espressif Systems** и установите пакет. Проект проверяется с Arduino-ESP32 3.x.
+6. Откройте `firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino`.
+
+Внешние Arduino-библиотеки устанавливать не требуется: прошивка использует библиотеки из ESP32 core.
+
+### 2. Параметры платы в Arduino IDE
+
+Для обычного ESP32-WROOM-32 / ESP32 DevKit используйте:
+
+| Параметр Arduino IDE | Значение |
+|---|---|
+| Board / Плата | **ESP32 Dev Module** |
+| Flash Size | **4MB (32Mb)** |
+| Partition Scheme | **Minimal SPIFFS (1.9MB APP with OTA / 190KB SPIFFS)** |
+| Upload Speed | `921600` при стабильном USB; при проблемах уменьшить до `460800` или `115200` |
+| CPU Frequency | `240MHz (WiFi/BT)` |
+| Flash Frequency | обычно `80MHz` |
+| Port | COM/tty-порт подключённого ESP32 |
+
+Название пункта **Minimal SPIFFS** может немного отличаться между версиями Arduino-ESP32. Существенно, чтобы разметка имела **две OTA app partitions** и позволяла разместить приложение примерно 1.9 МБ. Не выбирайте схему `Huge APP` без OTA, если хотите затем обновляться из Web UI.
+
+### 3. Первая прошивка через USB
+
+1. Подключите ESP32 к компьютеру USB-кабелем с линиями данных.
+2. Выберите правильный COM/tty-порт.
+3. Нажмите **Upload / Загрузить** в Arduino IDE.
+4. Если плата не переходит в загрузчик автоматически, удерживайте кнопку **BOOT**, запустите Upload и отпустите BOOT после появления `Connecting...`.
+5. После прошивки откройте Serial Monitor на **115200 baud**.
+
+Если Wi‑Fi ещё не настроен, ESP32 создаст точку доступа вида `ANENJI-SETUP-XXXXXX`. Имя сети и сгенерированный пароль выводятся в Serial Monitor. Адрес страницы настройки — `http://192.168.4.1/`.
+
+**Обычно прошивать через Arduino IDE/USB нужно только один раз.** После первой рабочей установки дальнейшие версии можно загружать через Web OTA без физического доступа к USB.
+
+Альтернативно первую установку можно выполнить через `esptool.py`, если у вас есть полный комплект бинарников и вы точно знаете offsets для bootloader, partition table и application. Для обычной установки проекта Arduino IDE безопаснее: она сама использует правильные offsets и параметры платы.
+
+## Обновление через Web OTA
+
+Готовые сборки публикуются на странице **GitHub Releases**:
+
+https://github.com/DanilVDV/esp32-anenji-wifi-rs485-controller/releases
+
+Для обычного обновления уже работающего контроллера:
+
+1. Откройте последний Release, например `v0.15.9`.
+2. Скачайте **основной application binary**:
+
+```text
+ANENJI_ESP32_Controller-vX.Y.Z.bin
+```
+
+3. Не используйте для Web OTA файлы `*-bootloader.bin` и `*-partitions.bin` — они предназначены для низкоуровневой USB/esptool-прошивки, а не для OTA.
+4. Откройте Web UI контроллера → **Сервис → OTA**.
+5. Разблокируйте OTA административным паролем, выберите скачанный `ANENJI_ESP32_Controller-vX.Y.Z.bin` и запустите обновление.
+6. Не отключайте питание и сеть во время записи. После успешной загрузки ESP32 перезагрузится в новую прошивку.
+7. После перезапуска проверьте номер версии в Web UI и связь с инвертором.
+
+Проект также автоматически компилируется в GitHub Actions. При выпуске релиза `.bin` собирается заново для **ESP32 Dev Module**, поэтому для обычного пользователя предпочтительно брать готовый файл именно из **Releases**, а не собирать его вручную.
+
+> **Откат:** если новая версия работает неправильно, скачайте application `.bin` предыдущего Release и загрузите его тем же Web OTA. Если Web UI/OTA уже недоступны, восстановление выполняется через USB из Arduino IDE или `esptool.py`.
+'''
+
+          pattern = r'## Сборка и прошивка\n.*?(?=\n## BOOT-кнопка)'
+          if not re.search(pattern, s, re.S):
+              raise SystemExit('Build/flash section not found')
+          s = re.sub(pattern, new_install.rstrip(), s, count=1, flags=re.S)
+
+          modbus_anchor = '''Телеметрия инвертора кэшируется из диапазона регистров `200..239`. Изменять через Web UI можно только allow-list регистров, зашитый в `SETTINGS[]`.
+'''
+          lithium_note = '''Телеметрия инвертора кэшируется из диапазона регистров `200..239`. Изменять через Web UI можно только allow-list регистров, зашитый в `SETTINGS[]`.
+
+> **Экспериментальное наблюдение по режиму Lithium:** на проверенном экземпляре ANENJI при выборе в настройках инвертора типа батареи **Lithium** порт `RS‑485/BMS` передаётся под обмен с литиевой BMS, после чего внешний ESP32-контроллер больше не может управлять инвертором через этот порт. Это поведение может зависеть от модели, аппаратной ревизии и версии штатной прошивки ANENJI и поэтому не утверждается как универсальное для всех устройств. Если после переключения типа батареи на Lithium пропала Modbus-связь с ESP32, первым делом верните прежний тип батареи через панель самого инвертора и повторно проверьте RS‑485.
+
+> Для конфигурации с внешним ESP32 на том же `RS‑485/BMS` не выбирайте режим Lithium только ради изменения алгоритма зарядки, пока не подтверждено, что конкретная версия инвертора допускает одновременный внешний Modbus-доступ и BMS-протокол.
+'''
+          if modbus_anchor not in s:
+              raise SystemExit('Modbus anchor not found')
+          s = s.replace(modbus_anchor, lithium_note, 1)
+
+          # Add direct release link near requirements/installation without changing firmware version.
+          p.write_text(s, encoding='utf-8')
+          PY
+
+          git diff --check
+          git diff -- README.md
+
+      - name: Commit README
+        run: |
+          git config user.name 'ChatGPT'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md
+          git commit -m 'Document first flash OTA and RS485 lithium caveat'
+          git push origin HEAD:main
