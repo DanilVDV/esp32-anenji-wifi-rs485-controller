@@ -1,4 +1,4 @@
-name: Promote optional clock v0.15.5 to main
+name: Fix scheduler tab routing on main
 
 on:
   push:
@@ -18,87 +18,60 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          path: base
           fetch-depth: 1
 
-      - name: Checkout patch tools
-        uses: actions/checkout@v4
-        with:
-          ref: chatgpt/anenji-alerts-v0.15.0
-          path: patchsrc
-          fetch-depth: 1
-
-      - name: Apply optional clock patch
+      - name: Fix scheduler card routing
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
-
-          p=Path('patchsrc/tools/apply_optional_clock_v0_15_5.py')
+          p=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
           s=p.read_text(encoding='utf-8')
-          pat=r"sub_once\(r'async function rtcSyncNtp\\\(\\\)\\\{\.\*\?\(\?=\\nasync function ntpSave\\\(\\\)\\\{\)',.*?'NTP UI sync', re\.S\)\n"
-          s2,n=re.subn(pat,'',s,count=1,flags=re.S)
-          if n!=1: raise SystemExit(f'obsolete NTP UI patch removal failed: {n}')
-          p.write_text(s2,encoding='utf-8')
-
-          q=Path('patchsrc/tools/fix_optional_clock_ui_v0_15_5.py')
-          u=q.read_text(encoding='utf-8')
-          marker="sub_once(r'async function rtcSyncNtp"
-          i=u.find(marker)
-          j=u.find('\np.write_text', i)
-          if i<0 or j<0: raise SystemExit('rtcSyncNtp fixer block not found')
-          q.write_text(u[:i]+u[j:],encoding='utf-8')
+          old_rule="['RTC / Планировщик','scheduler']"
+          new_rule="['Время / Планировщик','scheduler']"
+          old_tr="['RTC / Планировщик','RTC / Scheduler']"
+          new_tr="['Время / Планировщик','Time / Scheduler']"
+          for old,new,label in [(old_rule,new_rule,'TAB_RULES'),(old_tr,new_tr,'UI translation')]:
+              if s.count(old)!=1:
+                  raise SystemExit(f'{label}: expected exactly one old entry, got {s.count(old)}')
+              s=s.replace(old,new,1)
+          if 'const char* FW_VERSION = "0.15.5";' not in s or 'const char* FW_VERSION_PREVIOUS = "0.15.4";' not in s:
+              raise SystemExit('unexpected firmware version')
+          s=s.replace('const char* FW_VERSION = "0.15.5";','const char* FW_VERSION = "0.15.6";',1)
+          s=s.replace('const char* FW_VERSION_PREVIOUS = "0.15.4";','const char* FW_VERSION_PREVIOUS = "0.15.5";',1)
+          p.write_text(s,encoding='utf-8')
           PY
-          python3 patchsrc/tools/apply_optional_clock_v0_15_5.py base
-          python3 patchsrc/tools/fix_optional_clock_ui_v0_15_5.py base
 
-      - name: Validate clock fallback and embedded JavaScript
+      - name: Validate scheduler tab and embedded JavaScript
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
-          p=Path('base/firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
+          p=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
           s=p.read_text(encoding='utf-8')
-          req=[
-            'const char* FW_VERSION = "0.15.5";',
-            'enum ClockSource : uint8_t',
-            'CLOCK_NTP', 'CLOCK_BROWSER',
-            'bool clockNow(RtcDateTime& out)',
-            'esp_timer_get_time()',
-            'clockCache(ndt,CLOCK_NTP);',
-            'clockCache(dt,CLOCK_BROWSER);',
-            'uint32_t retryMs=ntpEverSynced?NTP_RETRY_MS:NTP_INITIAL_RETRY_MS;',
-            'if (!clockNow(dt)) return;',
-            'clockSourceName()',
-            'persistent_clock',
-            'persistent_stats',
-            'DS1307 и AT24C32 опциональны.',
-            'Задания планировщика хранятся в NVS.',
-            "const sched=await api('/api/schedule'); renderSchedule(sched.tasks);",
-            "const h=await verifiedAdminHeaders('rtcMsg'); if(!h)return;",
-            "api('/api/rtc/ntp'",
+          required=[
+            'const char* FW_VERSION = "0.15.6";',
+            '<div class="card"><h2>Время / Планировщик</h2>',
+            "['Время / Планировщик','scheduler']",
+            "['Время / Планировщик','Time / Scheduler']",
+            "for(const id of ['overview','battery','settings','scheduler','network','service'])",
+            "pages[page].appendChild(c);",
           ]
-          missing=[x for x in req if x not in s]
+          missing=[x for x in required if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
-          forbidden=[
-            '.pf-card','data-page="power"','renderPowerFlowCard','id="pfBoard"','<h2>Power Flow</h2>',"['Power Flow','power']",
-            "api('/api/ntp/sync'",
-            'WiFiUdp.h','DATALOGGER_UDP_PORT','dataloggerServiceMode','handleDatalogger','/api/datalogger/','<h2>Datalogger</h2>','async function dlReq'
-          ]
-          found=[x for x in forbidden if x in s]
-          if found: raise SystemExit('Forbidden leftovers: '+repr(found))
+          if "['RTC / Планировщик','scheduler']" in s:
+              raise SystemExit('old scheduler routing rule still present')
+          if s.count('<div class="card"><h2>Время / Планировщик</h2>') != 1:
+              raise SystemExit('scheduler card count is not exactly one')
           m=re.search(r'<script>(.*?)</script>',s,re.S)
           if not m: raise SystemExit('embedded JS not found')
           Path('/tmp/ui.js').write_text(m.group(1),encoding='utf-8')
-          print('candidate bytes',p.stat().st_size)
           PY
           node --check /tmp/ui.js
 
       - name: Commit firmware to main
-        working-directory: base
         run: |
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
-          git commit -m "Make RTC optional and remove duplicate energy tab"
+          git commit -m "Fix scheduler tab card routing"
           git push origin HEAD:main
