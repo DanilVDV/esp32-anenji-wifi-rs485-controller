@@ -1,4 +1,4 @@
-name: Refresh README media on main
+name: README promotion test
 
 on:
   push:
@@ -19,94 +19,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 1
-
-      - name: Install media tools
+      - name: Validate checkout
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq imagemagick ffmpeg
-
-      - name: Build readable current screenshots
-        run: |
-          set -euxo pipefail
-          for name in dashboard battery-stats rtc-scheduler network-modbus service-pzem-ota; do
-            convert "docs/media/${name}.webp" -filter Lanczos -resize 200% -unsharp 0x0.8+0.8+0.02 "docs/media/${name}-current.png"
-          done
-
-      - name: Build current UI demo video
-        run: |
-          set -euxo pipefail
-          {
-            for name in dashboard battery-stats rtc-scheduler network-modbus service-pzem-ota; do
-              echo "file '${GITHUB_WORKSPACE}/docs/media/${name}-current.png'"
-              echo "duration 5"
-            done
-            echo "file '${GITHUB_WORKSPACE}/docs/media/service-pzem-ota-current.png'"
-          } > /tmp/ui-demo.txt
-          ffmpeg -y -f concat -safe 0 -i /tmp/ui-demo.txt \
-            -vf "scale=840:-2:flags=lanczos,format=yuv420p" -r 24 \
-            -c:v libx264 -preset medium -crf 25 -movflags +faststart \
-            docs/media/demo-current.mp4
-
-      - name: Update README media block
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('README.md')
-          s=p.read_text(encoding='utf-8')
-          s=s.replace('Версия исходной прошивки: **0.14.31**.', 'Текущая версия прошивки: **0.15.6**.')
-          start=s.index('## Демонстрация Web UI')
-          end=s.index('\n## Возможности', start)
-          block='''## Демонстрация Web UI
-
-Актуальные кадры Web UI **v0.15.6**. Скриншоты показаны по одному и крупно; по клику открывается оригинал.
-
-<p align="center">
-  <a href="docs/media/demo-current.mp4">▶ Открыть актуальное видео интерфейса</a>
-</p>
-
-### Обзор / энергетическая схема
-
-<p align="center"><a href="docs/media/dashboard-current.png"><img src="docs/media/dashboard-current.png" alt="Обзор и энергетическая схема" width="840"></a></p>
-
-### Статистика аккумулятора
-
-<p align="center"><a href="docs/media/battery-stats-current.png"><img src="docs/media/battery-stats-current.png" alt="Статистика аккумулятора" width="840"></a></p>
-
-### Время / Планировщик
-
-<p align="center"><a href="docs/media/rtc-scheduler-current.png"><img src="docs/media/rtc-scheduler-current.png" alt="Время и планировщик" width="840"></a></p>
-
-### Wi-Fi / сеть ESP32 и Modbus / RS-485
-
-<p align="center"><a href="docs/media/network-modbus-current.png"><img src="docs/media/network-modbus-current.png" alt="Сеть и Modbus" width="840"></a></p>
-
-### Сервис / PZEM-016 / OTA
-
-<p align="center"><a href="docs/media/service-pzem-ota-current.png"><img src="docs/media/service-pzem-ota-current.png" alt="Сервис PZEM OTA" width="840"></a></p>
-
-> Это актуальные экраны интерфейса v0.15.6. Старые `demo.gif` и `demo.mp4` README больше не использует.
-'''
-          p.write_text(s[:start]+block+s[end:], encoding='utf-8')
-          PY
-
-      - name: Validate README media
-        run: |
-          test -s docs/media/dashboard-current.png
-          test -s docs/media/battery-stats-current.png
-          test -s docs/media/rtc-scheduler-current.png
-          test -s docs/media/network-modbus-current.png
-          test -s docs/media/service-pzem-ota-current.png
-          test -s docs/media/demo-current.mp4
-          grep -q 'dashboard-current.png' README.md
-          grep -q 'demo-current.mp4' README.md
-          ! grep -q 'docs/media/demo.gif' README.md
-          ! grep -q 'docs/media/demo.mp4' README.md
-
-      - name: Commit README media to main
-        run: |
-          git config user.name "ChatGPT"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md docs/media/*-current.png docs/media/demo-current.mp4
-          git diff --cached --check
-          git commit -m "Refresh README screenshots and demo video"
-          git push origin HEAD:main
+          test -f README.md
+          git status --short
