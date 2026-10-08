@@ -40,7 +40,6 @@
 */
 
 #include <WiFi.h>
-#include <WiFiUdp.h>
 #include <WebServer.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
@@ -313,13 +312,6 @@ void batteryStatsSave(bool force=false);
 bool adminAuthorized();
 bool haveReg(uint16_t reg);
 void handleEvents();
-void handleDataloggerStatus();
-void handleDataloggerServiceApStart();
-void handleDataloggerConnect();
-void handleDataloggerRestore();
-void handleDataloggerInfo();
-void handleDataloggerPing();
-void handleDataloggerSetParam();
 
 
 // ---------------- DEVICE / NETWORK SETTINGS ----------------
@@ -506,17 +498,9 @@ double batteryDischargeFrac_mAh = 0.0;
 HardwareSerial RS485(2);
 WebServer web(80);
 
-const uint16_t DATALOGGER_UDP_PORT = 58899;
-const uint16_t DATALOGGER_TCP_PORT = 8899;
-WiFiUDP dataloggerUdp;
-WiFiServer dataloggerServer(DATALOGGER_TCP_PORT);
-bool dataloggerServiceMode = false;
-String dataloggerLastTarget;
-String dataloggerLastInfo;
-uint32_t dataloggerLastOkMs = 0;
 
-const char* FW_VERSION = "0.15.2";
-const char* FW_VERSION_PREVIOUS = "0.15.1";
+const char* FW_VERSION = "0.15.3";
+const char* FW_VERSION_PREVIOUS = "0.15.2";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -668,9 +652,8 @@ void recoverRs485Uart() {
 }
 
 void serviceRtuWatchdog() {
-  // Never run UART recovery/reboot logic while OTA or datalogger service owns networking.
-  // Datalogger service must keep the temporary AP stable even if inverter RTU is offline.
-  if (otaInProgress || otaRestartPending || dataloggerServiceMode) return;
+  // Never run UART recovery/reboot logic while the synchronous OTA HTTP request owns loopTask.
+  if (otaInProgress || otaRestartPending) return;
   if (setupMode || !rtuWorkerHandle) return;
   const uint32_t now = millis();
 
@@ -736,9 +719,7 @@ void serviceHeapWatchdog() {
 }
 
 void serviceWifiWatchdog() {
-  // A deliberate datalogger AP session is not a home-Wi-Fi outage.
-  // Do not reboot or advance the Wi-Fi outage timer while service mode is active.
-  if (setupMode || dataloggerServiceMode || wifiSsid.length() == 0) {
+  if (setupMode || wifiSsid.length() == 0) {
     wifiDisconnectedSinceMs = 0;
     return;
   }
@@ -3158,143 +3139,6 @@ void handleProfileStatus(){
 }
 
 
-// ---------------- EyeBond / SmartESS datalogger service ----------------
-static uint16_t dlBe16(const uint8_t* p) { return ((uint16_t)p[0] << 8) | p[1]; }
-static void dlPut16(uint8_t* p, uint16_t v) { p[0]=(uint8_t)(v>>8); p[1]=(uint8_t)v; }
-
-bool dlWaitBytes(WiFiClient& c, uint8_t* dst, size_t len, uint32_t timeoutMs) {
-  size_t got=0; uint32_t started=millis();
-  while(got<len && (uint32_t)(millis()-started)<timeoutMs) {
-    while(c.available() && got<len) { int v=c.read(); if(v>=0) dst[got++]=(uint8_t)v; }
-    if(!c.connected() && !c.available()) break;
-    feedTaskWatchdog(); delay(2);
-  }
-  return got==len;
-}
-
-bool dlWriteFrame(WiFiClient& c, uint16_t tid, uint8_t fcode, const uint8_t* body, size_t bodyLen) {
-  if(bodyLen>240) return false;
-  uint8_t frame[248];
-  dlPut16(frame,tid); dlPut16(frame+2,1); dlPut16(frame+4,(uint16_t)(bodyLen+2));
-  frame[6]=0xff; frame[7]=fcode;
-  if(bodyLen) memcpy(frame+8,body,bodyLen);
-  return c.write(frame,bodyLen+8)==bodyLen+8;
-}
-
-bool dlReadFrame(WiFiClient& c, uint8_t expectedFcode, uint8_t* body, size_t bodyCap,
-                 size_t& bodyLen, String& err, uint32_t timeoutMs=1800) {
-  uint8_t h[8]; bodyLen=0;
-  if(!dlWaitBytes(c,h,sizeof(h),timeoutMs)){err="TCP response header timeout";return false;}
-  uint16_t wireLen=dlBe16(h+4);
-  if(wireLen<2){err="Invalid datalogger frame length";return false;}
-  bodyLen=wireLen-2;
-  if(bodyLen>bodyCap){err="Datalogger frame too large";return false;}
-  if(h[7]!=expectedFcode){err=String("Unexpected function code ")+h[7];return false;}
-  if(bodyLen && !dlWaitBytes(c,body,bodyLen,timeoutMs)){err="TCP response body timeout";return false;}
-  return true;
-}
-
-bool dlTargetFromBody(const String& body, IPAddress& target, String& targetText, String& err) {
-  targetText=""; jsonFindString(body,"ip",targetText);
-  if(!targetText.length() && dataloggerServiceMode) targetText=WiFi.gatewayIP().toString();
-  if(!targetText.length()){err="Datalogger IP required";return false;}
-  if(!target.fromString(targetText)){err="Invalid datalogger IP";return false;}
-  return true;
-}
-
-bool dlOpenSession(IPAddress target, WiFiClient& client, String& err) {
-  if(WiFi.status()!=WL_CONNECTED){err="ESP32 STA is not connected";return false;}
-  IPAddress local=WiFi.localIP();
-  if(local.toString()=="0.0.0.0"){err="ESP32 has no STA IP";return false;}
-  dataloggerServer.begin(); dataloggerServer.setNoDelay(true);
-  dataloggerUdp.stop();
-  if(!dataloggerUdp.begin(0)){err="UDP start failed";return false;}
-  String cmd=String("set>server=")+local.toString()+":"+String(DATALOGGER_TCP_PORT)+";";
-  if(!dataloggerUdp.beginPacket(target,DATALOGGER_UDP_PORT)){err="UDP beginPacket failed";return false;}
-  dataloggerUdp.write((const uint8_t*)cmd.c_str(),cmd.length());
-  if(!dataloggerUdp.endPacket()){err="UDP send failed";return false;}
-  String rsp; uint32_t started=millis();
-  while((uint32_t)(millis()-started)<5000UL){
-    int n=dataloggerUdp.parsePacket();
-    if(n>0){while(n-->0){int ch=dataloggerUdp.read();if(ch>=0)rsp+=(char)ch;}break;}
-    feedTaskWatchdog(); delay(5);
-  }
-  if(!rsp.startsWith("rsp>server=")){err=String("Unexpected UDP reply: ")+rsp;return false;}
-  started=millis();
-  while((uint32_t)(millis()-started)<5000UL){
-    WiFiClient c=dataloggerServer.available();
-    if(c){client=c;client.setNoDelay(true);dataloggerLastTarget=target.toString();return true;}
-    feedTaskWatchdog();delay(5);
-  }
-  err="Datalogger did not connect to TCP 8899";return false;
-}
-
-void dlCloseSession(WiFiClient& c){if(c)c.stop();dataloggerUdp.stop();}
-
-String dlInfoJson(IPAddress target,String& err){
-  WiFiClient c;if(!dlOpenSession(target,c,err))return "";
-  const uint8_t pars[]={1,2,5,6,7,11,12,48,3,4,14,34,41};
-  if(!dlWriteFrame(c,1,2,pars,sizeof(pars))){err="Info request write failed";dlCloseSession(c);return "";}
-  String j="{\"ok\":true,\"ip\":\""+target.toString()+"\",\"params\":{";bool first=true;
-  for(size_t i=0;i<sizeof(pars);++i){uint8_t b[220];size_t n=0;if(!dlReadFrame(c,2,b,sizeof(b),n,err)){dlCloseSession(c);return "";}if(n<2){err="Short info response";dlCloseSession(c);return "";}uint8_t par=b[1];String val;for(size_t k=2;k<n;++k)val+=(char)b[k];if(!first)j+=',';first=false;j+='"';j+=par;j+=F("\":\"");j+=jsonEscape(val);j+='"';}
-  j+=F("}}");dlCloseSession(c);dataloggerLastInfo=j;dataloggerLastOkMs=millis();return j;
-}
-
-void handleDataloggerStatus(){
-  String j=F("{\"ok\":true,\"experimental\":true,\"service_mode\":");j+=dataloggerServiceMode?F("true"):F("false");
-  j+=F(",\"sta_connected\":");j+=(WiFi.status()==WL_CONNECTED)?F("true"):F("false");
-  j+=F(",\"sta_ssid\":\"");j+=jsonEscape(WiFi.SSID());j+='"';
-  j+=F(",\"sta_ip\":\"");j+=WiFi.localIP().toString();j+='"';
-  j+=F(",\"gateway\":\"");j+=WiFi.gatewayIP().toString();j+='"';
-  j+=F(",\"service_ap_running\":");j+=setupApRunning?F("true"):F("false");
-  j+=F(",\"service_ap_ip\":\"");j+=WiFi.softAPIP().toString();j+='"';
-  j+=F(",\"last_target\":\"");j+=jsonEscape(dataloggerLastTarget);j+='"';
-  j+=F(",\"last_ok_age_ms\":");j+=dataloggerLastOkMs?(uint32_t)(millis()-dataloggerLastOkMs):0;j+='}';sendJson(200,j);
-}
-
-void handleDataloggerServiceApStart(){
-  WiFi.mode(WIFI_AP_STA);
-  if(!setupApRunning){WiFi.softAPConfig(SETUP_AP_IP,SETUP_AP_GW,SETUP_AP_MASK);setupApRunning=WiFi.softAP(setupApSsid.c_str(),setupApPassword.c_str());}
-  if(!setupApRunning){sendJson(500,F("{\"ok\":false,\"error\":\"Service AP start failed\"}"));return;}
-  String j=F("{\"ok\":true,\"ssid\":\"");j+=jsonEscape(setupApSsid);j+=F("\",\"password\":\"");j+=jsonEscape(setupApPassword);j+=F("\",\"ip\":\"");j+=WiFi.softAPIP().toString();j+=F("\",\"note\":\"Connect to this AP before switching ESP32 STA to the datalogger AP\"}");sendJson(200,j);
-}
-
-void handleDataloggerConnect(){
-  if(!setupApRunning){sendJson(409,F("{\"ok\":false,\"error\":\"Start service AP first\"}"));return;}
-  String body=web.arg("plain"),ssid,pass;if(!jsonFindString(body,"ssid",ssid)||!ssid.length()){sendJson(400,F("{\"ok\":false,\"error\":\"ssid required\"}"));return;}jsonFindString(body,"password",pass);
-  dataloggerServiceMode=true;wifiDisconnectedSinceMs=0;inverterOfflineSinceMs=0;
-  WiFi.mode(WIFI_AP_STA);WiFi.setAutoReconnect(false);WiFi.disconnect(false,false);delay(100);WiFi.begin(ssid.c_str(),pass.c_str());
-  uint32_t started=millis();while(WiFi.status()!=WL_CONNECTED&&(uint32_t)(millis()-started)<15000UL){feedTaskWatchdog();delay(100);}
-  if(WiFi.status()!=WL_CONNECTED){dataloggerServiceMode=false;sendJson(504,F("{\"ok\":false,\"error\":\"Could not connect to datalogger AP; service AP remains active\"}"));return;}
-  dataloggerServiceMode=true;String j=F("{\"ok\":true,\"sta_ip\":\"");j+=WiFi.localIP().toString();j+=F("\",\"datalogger_ip\":\"");j+=WiFi.gatewayIP().toString();j+=F("\"}");sendJson(200,j);
-}
-
-void handleDataloggerRestore(){
-  dataloggerServiceMode=false;wifiDisconnectedSinceMs=0;inverterOfflineSinceMs=0;WiFi.mode(WIFI_AP_STA);WiFi.setAutoReconnect(false);WiFi.disconnect(false,false);delay(100);if(wifiSsid.length())WiFi.begin(wifiSsid.c_str(),wifiPass.c_str());
-  sendJson(202,F("{\"ok\":true,\"restoring\":true,\"note\":\"ESP32 STA is reconnecting to saved home Wi-Fi; service AP remains available during recovery\"}"));
-}
-
-void handleDataloggerInfo(){String body=web.arg("plain"),err,targetText;IPAddress target;if(!dlTargetFromBody(body,target,targetText,err)){sendJson(400,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}String j=dlInfoJson(target,err);if(!j.length()){sendJson(502,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}sendJson(200,j);}
-
-void handleDataloggerPing(){
-  String body=web.arg("plain"),err,targetText;IPAddress target;if(!dlTargetFromBody(body,target,targetText,err)){sendJson(400,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}
-  WiFiClient c;if(!dlOpenSession(target,c,err)){sendJson(502,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}
-  time_t now=time(nullptr);struct tm t={};gmtime_r(&now,&t);uint8_t b[8];b[0]=(uint8_t)((t.tm_year+1900-2000)&0xff);b[1]=(uint8_t)(t.tm_mon+1);b[2]=(uint8_t)t.tm_mday;b[3]=(uint8_t)t.tm_hour;b[4]=(uint8_t)t.tm_min;b[5]=(uint8_t)t.tm_sec;dlPut16(b+6,300);
-  if(!dlWriteFrame(c,0xbeef,1,b,sizeof(b))){err="Ping write failed";dlCloseSession(c);sendJson(502,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}
-  uint8_t r[220];size_t n=0;if(!dlReadFrame(c,1,r,sizeof(r),n,err,1200)){dlCloseSession(c);sendJson(502,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}
-  String hex;const char* hd="0123456789abcdef";for(size_t i=0;i<n;++i){hex+=hd[r[i]>>4];hex+=hd[r[i]&15];}dlCloseSession(c);dataloggerLastOkMs=millis();sendJson(200,String("{\"ok\":true,\"response_hex\":\"")+hex+"\"}");
-}
-
-void handleDataloggerSetParam(){
-  if(!adminAuthorized()){sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}"));return;}
-  String body=web.arg("plain"),name,value,err,targetText;IPAddress target;if(!jsonFindString(body,"name",name)||!jsonFindString(body,"value",value)){sendJson(400,F("{\"ok\":false,\"error\":\"name/value required\"}"));return;}
-  uint8_t par=0;if(name=="ssid")par=41;else if(name=="password")par=43;else if(name=="restart")par=29;else{sendJson(400,F("{\"ok\":false,\"error\":\"Only ssid, password, restart are allowed\"}"));return;}
-  if(!dlTargetFromBody(body,target,targetText,err)){sendJson(400,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}WiFiClient c;if(!dlOpenSession(target,c,err)){sendJson(502,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}
-  uint8_t b[130];size_t n=1+value.length();if(n>sizeof(b)){dlCloseSession(c);sendJson(400,F("{\"ok\":false,\"error\":\"value too long\"}"));return;}b[0]=par;memcpy(b+1,value.c_str(),value.length());
-  if(!dlWriteFrame(c,1,3,b,n)){err="Set parameter write failed";dlCloseSession(c);sendJson(502,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}uint8_t r[16];size_t rn=0;if(!dlReadFrame(c,3,r,sizeof(r),rn,err)){dlCloseSession(c);sendJson(502,String("{\"ok\":false,\"error\":\"")+jsonEscape(err)+"\"}");return;}dlCloseSession(c);if(rn<2){sendJson(502,F("{\"ok\":false,\"error\":\"short set-param response\"}"));return;}
-  String j=F("{\"ok\":");j+=(r[0]==0)?F("true"):F("false");j+=F(",\"status\":");j+=r[0];j+=F(",\"param\":");j+=r[1];j+=F("}");sendJson(200,j);
-}
-
 // ---------------- Network / provisioning API ----------------
 bool requestIsFromSetupAp() {
   return setupApRunning && WiFi.softAPgetStationNum() > 0;
@@ -3714,20 +3558,20 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 
 <div class="card"><h2>Энергопотоки</h2>
 <div id="energyFlow" class="flow">
- <svg id="pzemHouseSvg" aria-hidden="true"><defs><marker id="pzemArrowMarker" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path id="pzemHouseArrow" d="M0,0 L8,4 L0,8 z"/></marker></defs><path id="pzemHousePath" marker-end="url(#pzemArrowMarker)"/></svg>
- <div class="flow-node flow-input"><div class="ico">▤</div><small>Ввод · PZEM</small><b id="fInput">— W</b><small id="fInputSub">общий ввод</small></div><div id="inputDown" class="flow-v"><span></span></div>
+ <svg id="pzemHouseSvg" data-pzem-overview aria-hidden="true"><defs><marker id="pzemArrowMarker" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path id="pzemHouseArrow" d="M0,0 L8,4 L0,8 z"/></marker></defs><path id="pzemHousePath" marker-end="url(#pzemArrowMarker)"/></svg>
+ <div id="pzemFlowNode" class="flow-node flow-input" data-pzem-overview><div class="ico">▤</div><small>Ввод · PZEM</small><b id="fInput">— W</b><small id="fInputSub">общий ввод</small></div><div id="inputDown" data-pzem-overview class="flow-v"><span></span></div>
  <div class="flow-node flow-pv"><div class="ico">☀️</div><small>PV</small><b id="fPv">— W</b><small id="fPvSub">—</small></div><div id="pvDown" class="flow-v"><span></span></div>
  <div class="flow-node flow-grid"><div class="ico">⚡</div><small>Сеть</small><b id="fGrid">— W</b><small id="fGridSub">—</small></div><div id="gridLine" class="flow-line"><span></span></div>
  <div class="flow-node flow-center"><div class="ico">▣</div><small>ANENJI</small><b id="fInv">—</b><small id="fInvSub">—</small></div><div id="loadLine" class="flow-line"><span></span></div>
  <div class="flow-node flow-load"><div class="ico">🏠</div><small>Нагрузка</small><b id="fLoad">— W</b><small id="fLoadSub">—</small></div>
  <div id="batVert" class="flow-v"><span></span></div><div class="flow-node flow-bat"><div class="ico">🔋</div><small>Батарея</small><b id="fBat">— V</b><small id="fBatSub">—</small></div>
 </div>
-<div class="small" style="margin:-5px 0 12px">Направление видно по движущейся точке и стрелке. Пунктир PZEM → Нагрузка показывает общий сетевой ввод дома; это не мощность выхода ANENJI reg213.</div>
+<div id="pzemFlowNote" data-pzem-overview class="small" style="margin:-5px 0 12px">Направление видно по движущейся точке и стрелке. Пунктир PZEM → Нагрузка показывает общий сетевой ввод дома; это не мощность выхода ANENJI reg213.</div>
 <div class="info-grid">
  <div class="info-box"><h3>Батарея</h3><div id="infoBattery"></div></div>
  <div class="info-box"><h3>Солнечная энергия / PV</h3><div id="infoPv"></div></div>
  <div class="info-box"><h3>Инвертор / Нагрузка</h3><div id="infoInv"></div></div>
- <div class="info-box"><h3>PZEM-016 · общий ввод</h3><div id="infoPzem">—</div></div>
+ <div id="infoPzemBox" data-pzem-overview class="info-box"><h3>PZEM-016 · общий ввод</h3><div id="infoPzem">—</div></div>
 </div></div>
 
 <div class="card"><h2>Полная телеметрия</h2><div id="tele" class="grid"></div><div class="toolbar" style="margin-top:12px"><button onclick="statusLoad(true)">Обновить сейчас</button><span id="age" class="small"></span></div></div>
@@ -3848,14 +3692,6 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 <div class="small" style="margin-top:8px">Требуется пароль администратора. Не отключайте питание во время записи. Настройки NVS и статистика AT24C32 при обычном OTA сохраняются.</div>
 </div>
 
-<div class="card"><h2>Datalogger</h2>
-<div class="small">Экспериментальное управление штатным EyeBond / SmartESS Wi-Fi datalogger. ESP32 не выполняет никаких действий автоматически.</div>
-<div class="grid" style="margin-top:10px"><label>IP datalogger<input id="dlIp" placeholder="например 192.168.1.50"></label><label>SSID точки datalogger<input id="dlApSsid" placeholder="Q00... / W00..."></label><label>Пароль точки datalogger<input id="dlApPass" type="password" placeholder="пароль AP"></label></div>
-<div class="toolbar" style="margin-top:10px"><button onclick="dlServiceAp()">1. Сервисная AP ESP32</button><button onclick="dlConnectAp()">2. Подключиться к AP datalogger</button><button onclick="dlRestore()">Вернуть домашний Wi-Fi</button></div>
-<div id="dlStatus" class="small" style="margin-top:8px">—</div>
-<div class="toolbar" style="margin-top:10px"><button onclick="dlInfo()">Info</button><button onclick="dlPing()">Ping</button></div>
-<details style="margin-top:10px"><summary>Изменение параметров datalogger</summary><div class="small" style="margin:8px 0">Команды подтверждены для SmartESS/EyeBond: STA SSID (41), STA password (43), restart (29). Это не пароль собственной AP datalogger.</div><div class="grid"><label>Новый STA SSID<input id="dlStaSsid"></label><label>Новый STA пароль<input id="dlStaPass" type="password"></label></div><div class="toolbar" style="margin-top:8px"><button onclick="dlSet('ssid')">Записать STA SSID</button><button onclick="dlSet('password')">Записать STA пароль</button><button onclick="dlRestart()">Restart datalogger</button></div></details>
-<pre id="dlOut" style="white-space:pre-wrap;max-height:260px;overflow:auto"></pre></div>
 
 <div class="card"><h2>Связь</h2>
 <div class="toolbar" style="margin-bottom:10px">
@@ -4138,7 +3974,7 @@ async function statusLoad(force=false){
   const x=await api(force?'/api/refresh':'/api/status'),t=x.telemetry||{};window.lastStatusPacket=x;writeEnabled=!!x.write_enabled;activeProfile=x.active_profile||activeProfile;
   $('tele').innerHTML=teleDefs.map(d=>`<div class=metric><small>${teleLabel(d[0],d[1])} · ${d[2]}</small><b>${f(t[d[0]],d[4])} ${d[3]}</b></div>`).join('');
   renderAlerts(x); eventsLoad(force);
-  const pz=x.pzem||{}; window.lastPzem=pz; if($('pzV')){ $('pzV').textContent=pz.online?f(pz.voltage,1)+' V':'— V'; $('pzA').textContent=pz.online?f(pz.current,3)+' A':'— A'; $('pzW').textContent=pz.online?f(pz.power,1)+' W':'— W'; $('pzKwh').textContent=pz.online?f(pz.energy_kwh,3)+' kWh':'— kWh'; $('pzHz').textContent=pz.online?f(pz.frequency,1)+' Hz':'— Hz'; $('pzPf').textContent=pz.online?f(pz.pf,2):'—'; $('pzemEnabled').checked=!!pz.enabled; $('pzemAddr').value=pz.address||1; $('pzemState').textContent=pz.enabled?(pz.online?('ONLINE · '+pz.age_ms+' ms'):'OFFLINE'):'выключен'; if(document.activeElement!==$('pzemT1'))$('pzemT1').value=Number(pz.t1_kwh||0).toFixed(3); if(document.activeElement!==$('pzemT2'))$('pzemT2').value=Number(pz.t2_kwh||0).toFixed(3); }
+  const pz=x.pzem||{}; window.lastPzem=pz; const pzemOverviewVisible=!!pz.online; document.querySelectorAll('[data-pzem-overview]').forEach(el=>el.style.display=pzemOverviewVisible?'':'none'); if(!pzemOverviewVisible)hidePzemHouseFlow(); if($('pzV')){ $('pzV').textContent=pz.online?f(pz.voltage,1)+' V':'— V'; $('pzA').textContent=pz.online?f(pz.current,3)+' A':'— A'; $('pzW').textContent=pz.online?f(pz.power,1)+' W':'— W'; $('pzKwh').textContent=pz.online?f(pz.energy_kwh,3)+' kWh':'— kWh'; $('pzHz').textContent=pz.online?f(pz.frequency,1)+' Hz':'— Hz'; $('pzPf').textContent=pz.online?f(pz.pf,2):'—'; $('pzemEnabled').checked=!!pz.enabled; $('pzemAddr').value=pz.address||1; $('pzemState').textContent=pz.enabled?(pz.online?('ONLINE · '+pz.age_ms+' ms'):'OFFLINE'):'выключен'; if(document.activeElement!==$('pzemT1'))$('pzemT1').value=Number(pz.t1_kwh||0).toFixed(3); if(document.activeElement!==$('pzemT2'))$('pzemT2').value=Number(pz.t2_kwh||0).toFixed(3); }
   if($('infoPzem')) $('infoPzem').innerHTML=kv('Мощность всего ввода',pz.online?f(pz.power,0)+' W':'—')+kv('Напряжение',pz.online?f(pz.voltage,1)+' V':'—')+kv('Ток',pz.online?f(pz.current,3)+' A':'—')+kv('Частота',pz.online?f(pz.frequency,1)+' Hz':'—')+kv('PF',pz.online?f(pz.pf,2):'—')+kv('PZEM энергия',pz.online?f(pz.energy_kwh,3)+' kWh':'—')+kv('T1 · 07–23',f(pz.t1_kwh,3)+' kWh')+kv('T2 · 23–07',f(pz.t2_kwh,3)+' kWh')+kv('Текущий тариф',pz.tariff===1?'T1':(pz.tariff===2?'T2':'—'));
   const wb=$('wifiBadge'),ib=$('invBadge'),swb=$('stateWifiBadge'),sib=$('stateInvBadge');
   const wifiClass='badge '+(x.wifi_online?'online':'offline');
@@ -4397,22 +4233,10 @@ async function modbusSave(){
 
 const TAB_STORAGE_KEY='anenji_active_tab';
 
-async function dlReq(path,body={},admin=false){const h={'Content-Type':'application/json'};if(admin){const p=prompt(currentLang==='ru'?'Пароль администратора ESP32':'ESP32 admin password');if(p===null)throw new Error('cancelled');h['X-ANENJI-Admin']=p;}const r=await fetch(path,{method:'POST',headers:h,body:JSON.stringify(body)});let x={};try{x=await r.json();}catch(e){}if(!r.ok||x.ok===false)throw new Error(x.error||('HTTP '+r.status));return x;}
-function dlTarget(){return ($('dlIp').value||'').trim();}
-function dlShow(x){$('dlOut').textContent=JSON.stringify(x,null,2);}
-async function dlStatus(){try{const r=await fetch('/api/datalogger/status',{cache:'no-store'}),x=await r.json();$('dlStatus').textContent=`STA: ${x.sta_ssid||'—'} ${x.sta_ip||''} | gateway ${x.gateway||'—'} | service AP ${x.service_ap_running?'ON':'OFF'}`;if(x.service_mode&&x.gateway&&!dlTarget())$('dlIp').value=x.gateway;}catch(e){}}
-async function dlServiceAp(){try{const x=await dlReq('/api/datalogger/service-ap/start');dlShow(x);alert(`Подключитесь к Wi-Fi ${x.ssid}\nПароль: ${x.password}\nОткройте http://${x.ip}`);dlStatus();}catch(e){alert(e.message)}}
-async function dlConnectAp(){try{const x=await dlReq('/api/datalogger/connect',{ssid:$('dlApSsid').value,password:$('dlApPass').value});dlShow(x);if(x.datalogger_ip)$('dlIp').value=x.datalogger_ip;dlStatus();}catch(e){alert(e.message)}}
-async function dlRestore(){try{dlShow(await dlReq('/api/datalogger/restore'));}catch(e){alert(e.message)}}
-async function dlInfo(){try{dlShow(await dlReq('/api/datalogger/info',{ip:dlTarget()}));}catch(e){alert(e.message)}}
-async function dlPing(){try{dlShow(await dlReq('/api/datalogger/ping',{ip:dlTarget()}));}catch(e){alert(e.message)}}
-async function dlSet(name){const v=name==='ssid'?$('dlStaSsid').value:$('dlStaPass').value;if(!confirm('Записать параметр '+name+' в datalogger?'))return;try{dlShow(await dlReq('/api/datalogger/set',{ip:dlTarget(),name:name,value:v},true));}catch(e){alert(e.message)}}
-async function dlRestart(){if(!confirm('Перезапустить datalogger?'))return;try{dlShow(await dlReq('/api/datalogger/set',{ip:dlTarget(),name:'restart',value:'1'},true));}catch(e){alert(e.message)}}
-setInterval(dlStatus,5000);setTimeout(dlStatus,1200);
 
 const TAB_RULES=[
  ['Состояние / аварии','overview'],['Энергопотоки','overview'],['Полная телеметрия','overview'],
- ['Связь','service'],['Datalogger','service'],
+ ['Связь','service'],
  ['Статистика аккумулятора','battery'],
  ['Настройки инвертора','settings'],
  ['RTC / Планировщик','scheduler'],
@@ -4789,13 +4613,6 @@ void setupWeb() {
   web.collectHeaders(headerKeys, 1);
   web.on("/", HTTP_GET, handleRoot);
   web.on("/api/status", HTTP_GET, sendJsonStatus);
-  web.on("/api/datalogger/status", HTTP_GET, handleDataloggerStatus);
-  web.on("/api/datalogger/service-ap/start", HTTP_POST, handleDataloggerServiceApStart);
-  web.on("/api/datalogger/connect", HTTP_POST, handleDataloggerConnect);
-  web.on("/api/datalogger/restore", HTTP_POST, handleDataloggerRestore);
-  web.on("/api/datalogger/info", HTTP_POST, handleDataloggerInfo);
-  web.on("/api/datalogger/ping", HTTP_POST, handleDataloggerPing);
-  web.on("/api/datalogger/set", HTTP_POST, handleDataloggerSetParam);
   web.on("/api/events", HTTP_GET, handleEvents);
   web.on("/api/refresh", HTTP_GET, handleRefresh);
   web.on("/api/raw", HTTP_GET, handleRaw);
@@ -5063,7 +4880,7 @@ void loop() {
 
   if (setupMode) {
     dnsServer.processNextRequest();
-  } else if (!dataloggerServiceMode && WiFi.status() != WL_CONNECTED && wifiSsid.length()) {
+  } else if (WiFi.status() != WL_CONNECTED && wifiSsid.length()) {
     static uint32_t lastRetry = 0;
     if ((uint32_t)(millis() - lastRetry) > 10000) {
       lastRetry = millis();
