@@ -1,4 +1,4 @@
-name: Promote power flow v0.15.4 to main
+name: Promote optional clock v0.15.5 to main
 
 on:
   push:
@@ -28,10 +28,10 @@ jobs:
           path: patchsrc
           fetch-depth: 1
 
-      - name: Apply power flow patch
-        run: python3 patchsrc/tools/apply_powerflow_v0_15_4.py base
+      - name: Apply optional clock patch
+        run: python3 patchsrc/tools/apply_optional_clock_v0_15_5.py base
 
-      - name: Validate power flow UI and embedded JavaScript
+      - name: Validate clock fallback and embedded JavaScript
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -39,25 +39,29 @@ jobs:
           p=Path('base/firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
           s=p.read_text(encoding='utf-8')
           req=[
-            'const char* FW_VERSION = "0.15.4";',
-            'data-page="power"',
-            '<h2>Power Flow</h2>',
-            "['Power Flow','power']",
-            "['overview','power','battery','settings','scheduler','network','service']",
-            'function renderPowerFlowCard(t)',
-            "renderPowerFlowCard(t);",
-            "gridOnline=!!pz.online",
-            "classList.toggle('pf-hidden',!gridOnline)",
-            '@keyframes pfMoveH',
-            '@keyframes pfMoveV'
+            'const char* FW_VERSION = "0.15.5";',
+            'enum ClockSource : uint8_t',
+            'CLOCK_NTP', 'CLOCK_BROWSER',
+            'bool clockNow(RtcDateTime& out)',
+            'esp_timer_get_time()',
+            'clockCache(ndt,CLOCK_NTP);',
+            'clockCache(dt,CLOCK_BROWSER);',
+            'uint32_t retryMs=ntpEverSynced?NTP_RETRY_MS:NTP_INITIAL_RETRY_MS;',
+            'if (!clockNow(dt)) return;',
+            '\"source\":\"',
+            '\"persistent_clock\":',
+            '\"persistent_stats\":',
+            'DS1307 и AT24C32 опциональны.',
+            'Задания планировщика хранятся в NVS.'
           ]
           missing=[x for x in req if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
-          forbidden=['WiFiUdp.h','DATALOGGER_UDP_PORT','dataloggerServiceMode','handleDatalogger','/api/datalogger/','<h2>Datalogger</h2>','async function dlReq']
+          forbidden=[
+            '.pf-card','data-page="power"','renderPowerFlowCard','id="pfBoard"','<h2>Power Flow</h2>',"['Power Flow','power']",
+            'WiFiUdp.h','DATALOGGER_UDP_PORT','dataloggerServiceMode','handleDatalogger','/api/datalogger/','<h2>Datalogger</h2>','async function dlReq'
+          ]
           found=[x for x in forbidden if x in s]
-          if found: raise SystemExit('Datalogger leftovers: '+repr(found))
-          if s.count('id="pfBoard"') != 1: raise SystemExit('pfBoard duplicate/missing')
-          if s.count('data-page="power"') != 1: raise SystemExit('power tab duplicate/missing')
+          if found: raise SystemExit('Forbidden leftovers: '+repr(found))
           m=re.search(r'<script>(.*?)</script>',s,re.S)
           if not m: raise SystemExit('embedded JS not found')
           Path('/tmp/ui.js').write_text(m.group(1),encoding='utf-8')
@@ -71,5 +75,5 @@ jobs:
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
-          git commit -m "Add dedicated EyeBond-style power flow tab"
+          git commit -m "Make RTC optional and remove duplicate energy tab"
           git push origin HEAD:main
