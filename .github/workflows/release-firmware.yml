@@ -1,0 +1,73 @@
+name: Release firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish, e.g. v0.15.9'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Validate embedded JavaScript
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
+          s=p.read_text(encoding='utf-8')
+          m=re.search(r'R"HTML\((.*?)\)HTML"',s,re.S)
+          if not m: raise SystemExit('Embedded HTML block not found')
+          scripts=re.findall(r'<script>(.*?)</script>',m.group(1),re.S)
+          if not scripts: raise SystemExit('Embedded JavaScript not found')
+          Path('/tmp/embedded.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/embedded.js
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Arduino core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile release binaries
+        run: |
+          mkdir -p build/anenji build/release
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir build/anenji \
+            firmware/ANENJI_ESP32_Controller
+          cp build/anenji/ANENJI_ESP32_Controller.ino.bin "build/release/ANENJI_ESP32_Controller-${RELEASE_TAG}.bin"
+          cp build/anenji/ANENJI_ESP32_Controller.ino.bootloader.bin "build/release/ANENJI_ESP32_Controller-${RELEASE_TAG}-bootloader.bin"
+          cp build/anenji/ANENJI_ESP32_Controller.ino.partitions.bin "build/release/ANENJI_ESP32_Controller-${RELEASE_TAG}-partitions.bin"
+          sha256sum build/release/*.bin > "build/release/SHA256SUMS-${RELEASE_TAG}.txt"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" build/release/* --clobber
+          else
+            gh release create "$RELEASE_TAG" build/release/* \
+              --title "ANENJI ESP32 $RELEASE_TAG" \
+              --generate-notes
+          fi
