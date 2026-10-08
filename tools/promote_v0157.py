@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Promotion helper for ANENJI firmware v0.15.7.
 from pathlib import Path
 import re, sys
 
