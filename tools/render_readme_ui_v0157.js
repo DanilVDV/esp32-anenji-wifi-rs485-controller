@@ -9,6 +9,16 @@ function chromePath() {
   throw new Error('Chrome/Chromium executable not found');
 }
 
+async function switchPage(page, id) {
+  await page.evaluate(id => {
+    const b = document.querySelector(`.app-tab[data-page="${id}"]`);
+    if (!b) throw new Error(`tab not found: ${id}`);
+    b.click();
+    window.scrollTo(0,0);
+  }, id);
+  await page.waitForTimeout(350);
+}
+
 (async () => {
   const browser = await chromium.launch({headless:true, executablePath:chromePath(), args:['--no-sandbox']});
   const page = await browser.newPage({viewport:{width:1440,height:900}, deviceScaleFactor:1});
@@ -42,35 +52,37 @@ function chromePath() {
 
   await page.goto('file:///tmp/ui.html');
   await page.waitForTimeout(1400);
-  const pages = [['overview',2],['battery',3],['settings',3],['scheduler',2],['network',2],['service',2]];
-  for (const [id,count] of pages) {
-    await page.evaluate(id => {
-      const b = document.querySelector(`.app-tab[data-page="${id}"]`);
-      if (b) b.click();
-      window.scrollTo(0,0);
-    }, id);
-    await page.waitForTimeout(350);
-    const height = await page.evaluate(() => Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
-    const max = Math.max(0, height - 900);
-    const positions = count === 2 ? [0,max] : [0,Math.round(max/2),max];
-    for (let i=0;i<positions.length;i++) {
-      await page.evaluate(y => window.scrollTo(0,y), positions[i]);
-      await page.waitForTimeout(150);
+
+  const pageDefs = [
+    ['overview', [[1440,900],[430,900]]],
+    ['battery', [[1440,900],[768,900],[430,900]]],
+    ['settings', [[1440,900],[768,900],[430,900]]],
+    ['scheduler', [[1440,900],[430,900]]],
+    ['network', [[1440,900],[430,900]]],
+    ['service', [[1440,900],[430,900]]]
+  ];
+
+  for (const [id, views] of pageDefs) {
+    for (let i=0;i<views.length;i++) {
+      const [width,height] = views[i];
+      await page.setViewportSize({width,height});
+      await switchPage(page,id);
       await page.screenshot({path:`docs/media/ui-v0157-${id}-${i+1}.png`, fullPage:false});
     }
   }
   await browser.close();
 
-  execFileSync('convert', [
-    '-delay','85','-loop','0',
-    'docs/media/ui-v0157-overview-1.png',
-    'docs/media/ui-v0157-battery-1.png',
-    'docs/media/ui-v0157-settings-1.png',
-    'docs/media/ui-v0157-scheduler-1.png',
-    'docs/media/ui-v0157-network-1.png',
-    'docs/media/ui-v0157-service-1.png',
-    '-resize','900x',
-    'docs/media/ui-v0157-preview.gif'
-  ], {stdio:'inherit'});
-  console.log('Rendered 14 screenshots and short preview');
+  const shots = [];
+  for (const id of ['overview','battery','settings','scheduler','network','service']) {
+    shots.push(`docs/media/ui-v0157-${id}-1.png`);
+  }
+  execFileSync('convert', ['-delay','85','-loop','0', ...shots, '-resize','900x', 'docs/media/ui-v0157-preview.gif'], {stdio:'inherit'});
+
+  // Fail if a page gallery accidentally contains byte-identical screenshots.
+  const crypto = require('crypto');
+  for (const [id, views] of pageDefs) {
+    const hashes = views.map((_,i)=>crypto.createHash('sha256').update(fs.readFileSync(`docs/media/ui-v0157-${id}-${i+1}.png`)).digest('hex'));
+    if (new Set(hashes).size !== hashes.length) throw new Error(`duplicate screenshots for ${id}`);
+  }
+  console.log('Rendered 14 distinct responsive screenshots and short preview');
 })().catch(e => { console.error(e); process.exit(1); });
