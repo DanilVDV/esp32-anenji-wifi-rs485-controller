@@ -47,6 +47,7 @@
 #include <DNSServer.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#include <esp_timer.h>
 #include <Wire.h>
 #include <time.h>
 #include <freertos/FreeRTOS.h>
@@ -430,12 +431,18 @@ const uint8_t AT24C32_PAGE_SIZE = 32;
 const uint8_t SCHEDULE_TASK_COUNT = 8;
 ScheduleTask scheduleTasks[SCHEDULE_TASK_COUNT] = {};
 bool rtcPresent = false;
+enum ClockSource : uint8_t { CLOCK_NONE=0, CLOCK_RTC=1, CLOCK_NTP=2, CLOCK_BROWSER=3 };
+ClockSource clockSource = CLOCK_NONE;
+uint64_t clockCachedAtUs = 0;
+bool clockNow(RtcDateTime& out);
+const char* clockSourceName();
 
-// NTP -> DS1307 synchronization. NTP is UTC; local RTC is kept in local civil time.
+// NTP -> local software clock, with optional DS1307 persistence. NTP is UTC; local RTC is kept in local civil time.
 const char* NTP_DEFAULT_SERVER = "pool.ntp.org";
 const char* NTP_FALLBACK_SERVER = "time.google.com";
 String ntpServer = NTP_DEFAULT_SERVER;
 int16_t ntpUtcOffsetMin = 180; // fixed UTC offset, default UTC+03:00
+const uint32_t NTP_INITIAL_RETRY_MS = 5000UL;
 const uint32_t NTP_RETRY_MS = 15UL*60UL*1000UL;
 const uint32_t NTP_RESYNC_MS = 6UL*60UL*60UL*1000UL;
 bool ntpConfigured=false;
@@ -499,8 +506,8 @@ HardwareSerial RS485(2);
 WebServer web(80);
 
 
-const char* FW_VERSION = "0.15.4";
-const char* FW_VERSION_PREVIOUS = "0.15.3";
+const char* FW_VERSION = "0.15.5";
+const char* FW_VERSION_PREVIOUS = "0.15.4";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -1090,9 +1097,10 @@ void pollPzem016() {
 uint64_t pzemTariffTotal_mWh(){ return pzemTariff.t1_mWh + pzemTariff.t2_mWh; }
 
 uint8_t currentTariff(){
-  // T1 07:00..22:59, T2 23:00..06:59. RTC is kept in local civil time.
-  if(!rtcPresent || !rtcCached.valid) return 0;
-  return (rtcCached.hour>=7 && rtcCached.hour<23) ? 1 : 2;
+  // T1 07:00..22:59, T2 23:00..06:59. Clock is local civil time.
+  RtcDateTime now;
+  if(!clockNow(now)) return 0;
+  return (now.hour>=7 && now.hour<23) ? 1 : 2;
 }
 
 bool pzemTariffRecordValid(const PzemTariffPersist& r){
@@ -1694,8 +1702,9 @@ void detectExternalEeprom() {
 }
 
 uint32_t rtcDateKey() {
-  if(!rtcPresent || !rtcCached.valid) return 0;
-  return (uint32_t)rtcCached.year*10000UL+(uint32_t)rtcCached.month*100UL+rtcCached.day;
+  RtcDateTime now;
+  if(!clockNow(now)) return 0;
+  return (uint32_t)now.year*10000UL+(uint32_t)now.month*100UL+now.day;
 }
 
 float profileNominalVoltage() {
@@ -2238,6 +2247,49 @@ int64_t rtcCivilSeconds(const RtcDateTime& d) {
   return civilDaysFromEpoch(d.year,d.month,d.day)*86400LL + (int64_t)d.hour*3600LL + (int64_t)d.minute*60LL + d.second;
 }
 
+bool clockDateTimeValid(const RtcDateTime& d) {
+  return d.valid && d.year>=2024 && d.year<=2099 && d.month>=1 && d.month<=12 &&
+         d.day>=1 && d.day<=31 && d.hour<=23 && d.minute<=59 && d.second<=59;
+}
+
+const char* clockSourceName() {
+  switch(clockSource){
+    case CLOCK_RTC: return "rtc";
+    case CLOCK_NTP: return "ntp";
+    case CLOCK_BROWSER: return "browser";
+    default: return "none";
+  }
+}
+
+void clockCache(const RtcDateTime& dt, ClockSource source) {
+  if(!clockDateTimeValid(dt)) return;
+  rtcCached=dt;
+  rtcCachedAtMs=millis();
+  clockCachedAtUs=(uint64_t)esp_timer_get_time();
+  clockSource=source;
+}
+
+bool clockNow(RtcDateTime& out) {
+  if(!clockDateTimeValid(rtcCached) || !clockCachedAtUs) { out.valid=false; return false; }
+  uint64_t elapsed=(uint64_t)(esp_timer_get_time()-clockCachedAtUs)/1000000ULL;
+  uint64_t tod=(uint64_t)rtcCached.hour*3600ULL+(uint64_t)rtcCached.minute*60ULL+rtcCached.second+elapsed;
+  uint32_t days=(uint32_t)(tod/86400ULL);
+  uint32_t rem=(uint32_t)(tod%86400ULL);
+  out=rtcCached;
+  out.hour=(uint8_t)(rem/3600U); rem%=3600U;
+  out.minute=(uint8_t)(rem/60U); out.second=(uint8_t)(rem%60U);
+  while(days--){
+    static const uint8_t mdays[]={31,28,31,30,31,30,31,31,30,31,30,31};
+    uint8_t dim=mdays[out.month-1];
+    bool leap=(out.year%4==0 && (out.year%100!=0 || out.year%400==0));
+    if(out.month==2 && leap) dim=29;
+    if(++out.day>dim){out.day=1;if(++out.month>12){out.month=1;out.year++;}}
+    if(out.year>2099){out.valid=false;return false;}
+  }
+  out.valid=true;
+  return true;
+}
+
 bool ntpLocalDateTime(RtcDateTime& out) {
   struct tm tmNow;
   if (!getLocalTime(&tmNow, 50)) return false;
@@ -2251,36 +2303,50 @@ void serviceNtpRtcSync() {
   if (setupMode || WiFi.status()!=WL_CONNECTED) return;
   uint32_t now=millis();
   if (!ntpConfigured) {
-    // Fixed UTC offset only; no DST/seasonal conversion. DS1307 stores local civil time.
+    // Fixed UTC offset only; no DST/seasonal conversion. The logical clock uses local civil time.
     configTime((long)ntpUtcOffsetMin * 60L, 0, ntpServer.c_str(), NTP_FALLBACK_SERVER);
-    ntpConfigured=true; ntpLastAttemptMs=now;
+    ntpConfigured=true;
+    ntpLastAttemptMs=0; // allow the first sync immediately after Wi-Fi/NTP setup
     Serial.println(F("[NTP] client configured"));
   }
   bool due=!ntpEverSynced || (uint32_t)(now-ntpLastSyncMs)>=NTP_RESYNC_MS;
   if (!due) return;
-  if (ntpLastAttemptMs && (uint32_t)(now-ntpLastAttemptMs)<NTP_RETRY_MS && ntpEverSynced==false) return;
+  uint32_t retryMs=ntpEverSynced?NTP_RETRY_MS:NTP_INITIAL_RETRY_MS;
+  if (ntpLastAttemptMs && (uint32_t)(now-ntpLastAttemptMs)<retryMs) return;
   ntpLastAttemptMs=now;
   RtcDateTime ndt;
   if (!ntpLocalDateTime(ndt)) return;
-  RtcDateTime old=rtcCached;
-  if (rtcPresent && old.valid) ntpLastCorrectionSec=(int32_t)(rtcCivilSeconds(ndt)-rtcCivilSeconds(old)); else ntpLastCorrectionSec=0;
-  if (!rtcWrite(ndt)) { Serial.println(F("[NTP] RTC write failed")); return; }
-  rtcPresent=true; rtcCached=ndt; rtcCachedAtMs=now; schedulerLastMinuteKey=0xFFFFFFFFUL;
+  RtcDateTime old;
+  if (clockNow(old)) ntpLastCorrectionSec=(int32_t)(rtcCivilSeconds(ndt)-rtcCivilSeconds(old)); else ntpLastCorrectionSec=0;
+  clockCache(ndt,CLOCK_NTP);
+  bool rtcStored=false;
+  if(rtcPresent){
+    rtcStored=rtcWrite(ndt);
+    if(!rtcStored) rtcPresent=false;
+  }
+  schedulerLastMinuteKey=0xFFFFFFFFUL;
   ntpEverSynced=true; ntpLastSyncMs=now;
-  Serial.print(F("[NTP] DS1307 synchronized; correction s=")); Serial.println(ntpLastCorrectionSec);
+  Serial.print(F("[NTP] clock synchronized; correction s=")); Serial.print(ntpLastCorrectionSec);
+  Serial.print(F("; RTC persisted=")); Serial.println(rtcStored?F("yes"):F("no"));
 }
 
 void serviceScheduler() {
   static uint32_t lastCheckMs=0;
+  static uint32_t lastRtcProbeMs=0;
   if (setupMode || (uint32_t)(millis()-lastCheckMs) < 1000) return;
   lastCheckMs=millis();
 
+  bool probeRtc=rtcPresent || !lastRtcProbeMs || (uint32_t)(millis()-lastRtcProbeMs)>=60000UL;
+  if(probeRtc){
+    lastRtcProbeMs=millis();
+    RtcDateTime hw={0,0,0,0,0,0,false};
+    bool busOk=rtcRead(hw);
+    rtcPresent=busOk;
+    if(busOk && hw.valid) clockCache(hw,CLOCK_RTC);
+  }
+
   RtcDateTime dt;
-  if (!rtcRead(dt)) { rtcPresent=false; return; }
-  rtcPresent=true;
-  rtcCached=dt;
-  rtcCachedAtMs=millis();
-  if (!dt.valid) return;
+  if (!clockNow(dt)) return;
 
   uint32_t dayKey=(uint32_t)dt.year*10000UL+(uint32_t)dt.month*100UL+dt.day;
   uint32_t minuteKey=(dayKey*1440UL)+(uint32_t)dt.hour*60UL+dt.minute;
@@ -2297,17 +2363,19 @@ void serviceScheduler() {
 }
 
 void handleRtcGet() {
-  // HTTP must never wait on I2C. serviceScheduler() refreshes this cache.
-  bool busOk=rtcPresent;
-  RtcDateTime dt=rtcCached;
+  RtcDateTime dt={0,0,0,0,0,0,false};
+  bool timeOk=clockNow(dt);
   String j=F("{\"ok\":true,\"present\":");
-  j+=busOk?F("true"):F("false");
-  j+=F(",\"valid\":"); j+=(busOk&&dt.valid)?F("true"):F("false");
-  j+=F(",\"type\":\"DS1307/compatible\"");
+  j+=rtcPresent?F("true"):F("false");
+  j+=F(",\"valid\":"); j+=timeOk?F("true"):F("false");
+  j+=F(",\"type\":\""); j+=rtcPresent?F("DS1307/compatible"):F("software"); j+=F("\"");
+  j+=F(",\"source\":\""); j+=clockSourceName(); j+=F("\"");
+  j+=F(",\"persistent_clock\":"); j+=rtcPresent?F("true"):F("false");
   j+=F(",\"eeprom_present\":"); j+=eepromPresent?F("true"):F("false");
+  j+=F(",\"persistent_stats\":"); j+=eepromPresent?F("true"):F("false");
   j+=F(",\"eeprom_addr\":"); if(eepromPresent) j+=eepromI2cAddr; else j+=F("null");
-  j+=F(",\"time\":\""); if(busOk&&dt.valid)j+=rtcIso(dt); j+=F("\"");
-  j+=F(",\"cache_age_ms\":"); if(rtcCachedAtMs)j+=(millis()-rtcCachedAtMs);else j+=F("null");
+  j+=F(",\"time\":\""); if(timeOk)j+=rtcIso(dt); j+=F("\"");
+  j+=F(",\"cache_age_ms\":"); if(clockCachedAtUs)j+=(uint32_t)((esp_timer_get_time()-clockCachedAtUs)/1000ULL);else j+=F("null");
   j+=F(",\"ntp_server\":\""); j+=jsonEscape(ntpServer); j+=F("\"");
   j+=F(",\"ntp_utc_offset_min\":"); j+=ntpUtcOffsetMin;
   j+=F(",\"ntp_synced\":"); j+=ntpEverSynced?F("true"):F("false");
@@ -2328,9 +2396,12 @@ void handleRtcSet() {
     sendJson(400,F("{\"ok\":false,\"error\":\"year/month/day/hour/minute/second required\"}")); return;
   }
   RtcDateTime dt={(uint16_t)y,(uint8_t)mo,(uint8_t)d,(uint8_t)h,(uint8_t)mi,(uint8_t)se,true};
-  if (!rtcWrite(dt)) { sendJson(500,F("{\"ok\":false,\"error\":\"RTC write failed\"}")); return; }
-  rtcPresent=true; rtcCached=dt; rtcCachedAtMs=millis(); schedulerLastMinuteKey=0xFFFFFFFFUL;
-  sendJson(200,F("{\"ok\":true,\"saved\":true}"));
+  if(!clockDateTimeValid(dt)){sendJson(400,F("{\"ok\":false,\"error\":\"invalid date/time\"}"));return;}
+  clockCache(dt,CLOCK_BROWSER);
+  bool rtcStored=false;
+  if(rtcPresent){rtcStored=rtcWrite(dt);if(!rtcStored)rtcPresent=false;}
+  schedulerLastMinuteKey=0xFFFFFFFFUL;
+  String j=F("{\"ok\":true,\"saved\":true,\"source\":\"browser\",\"rtc_persisted\":");j+=rtcStored?F("true"):F("false");j+='}';sendJson(200,j);
 }
 
 void handleNtpConfigSet() {
@@ -2393,15 +2464,17 @@ void handlePzemTariffSet() {
 void handleRtcNtpSync() {
   if (!adminAuthorized()) { sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}")); return; }
   if (WiFi.status()!=WL_CONNECTED) { sendJson(503,F("{\"ok\":false,\"error\":\"Wi-Fi offline\"}")); return; }
-  if (!ntpConfigured) { configTime((long)ntpUtcOffsetMin * 60L, 0, ntpServer.c_str(), NTP_FALLBACK_SERVER); ntpConfigured=true; }
+  if (!ntpConfigured) { configTime((long)ntpUtcOffsetMin * 60L, 0, ntpServer.c_str(), NTP_FALLBACK_SERVER); ntpConfigured=true; ntpLastAttemptMs=0; }
   RtcDateTime ndt={0,0,0,0,0,0,false}; uint32_t deadline=millis()+3500;
   while(!ntpLocalDateTime(ndt) && (int32_t)(deadline-millis())>0) { delay(50); feedTaskWatchdog(); }
   if (!ndt.valid) { sendJson(504,F("{\"ok\":false,\"error\":\"NTP time unavailable\"}")); return; }
-  RtcDateTime old=rtcCached;
-  if(rtcPresent&&old.valid) ntpLastCorrectionSec=(int32_t)(rtcCivilSeconds(ndt)-rtcCivilSeconds(old)); else ntpLastCorrectionSec=0;
-  if(!rtcWrite(ndt)){sendJson(500,F("{\"ok\":false,\"error\":\"RTC write failed\"}"));return;}
-  rtcPresent=true;rtcCached=ndt;rtcCachedAtMs=millis();ntpEverSynced=true;ntpLastSyncMs=millis();ntpLastAttemptMs=millis();schedulerLastMinuteKey=0xFFFFFFFFUL;
-  sendJson(200,F("{\"ok\":true,\"synced\":true}"));
+  RtcDateTime old;
+  if(clockNow(old)) ntpLastCorrectionSec=(int32_t)(rtcCivilSeconds(ndt)-rtcCivilSeconds(old)); else ntpLastCorrectionSec=0;
+  clockCache(ndt,CLOCK_NTP);
+  bool rtcStored=false;
+  if(rtcPresent){rtcStored=rtcWrite(ndt);if(!rtcStored)rtcPresent=false;}
+  ntpEverSynced=true;ntpLastSyncMs=millis();ntpLastAttemptMs=millis();schedulerLastMinuteKey=0xFFFFFFFFUL;
+  String j=F("{\"ok\":true,\"synced\":true,\"source\":\"ntp\",\"rtc_persisted\":");j+=rtcStored?F("true"):F("false");j+='}';sendJson(200,j);
 }
 
 void handleScheduleGet() {
@@ -3533,34 +3606,11 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 .tab-page>.card:first-child{margin-top:0}
 @media(max-width:650px){.app-tabs{margin-left:-4px;margin-right:-4px}.app-tab{padding:8px 10px;font-size:13px}}
 
-
-/* EyeBond-inspired dedicated Power Flow tab. Browser-side only. */
-.pf-card{overflow:hidden;background:radial-gradient(circle at 50% 43%,#12324a 0,#0b1728 34%,#0b1220 72%);border-color:#1e3a5f}
-.pf-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px}.pf-head h2{margin:0}.pf-live{font-size:12px;color:#93c5fd}
-.pf-board{--pf-line:#38bdf8;display:grid;grid-template-columns:minmax(105px,1fr) 72px minmax(120px,1.1fr) 72px minmax(105px,1fr);grid-template-rows:minmax(108px,auto) 62px minmax(108px,auto);align-items:center;justify-items:center;gap:5px;min-height:390px;padding:16px 8px 8px;position:relative}
-.pf-node{width:min(150px,100%);min-height:92px;border:1px solid #334155;border-radius:22px;background:linear-gradient(145deg,#111c2e,#0b1322);box-shadow:0 12px 30px #0006,inset 0 0 28px #0ea5e915;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:9px;position:relative;z-index:2}
-.pf-node .pf-ico{font-size:29px;line-height:1;margin-bottom:5px;filter:drop-shadow(0 0 8px #38bdf888)}.pf-node small{color:#94a3b8}.pf-node b{font-size:20px;margin:3px 0}.pf-node .pf-sub{font-size:11px;color:#94a3b8;line-height:1.25}
-.pf-node.pf-core{border-color:#0ea5e9;box-shadow:0 0 28px #0284c744,inset 0 0 32px #0ea5e91c}.pf-node.pf-home{border-color:#a855f7}.pf-node.pf-battery{border-color:#22c55e}.pf-node.pf-grid{border-color:#f59e0b}.pf-node.pf-pv{border-color:#06b6d4}
-.pf-pv{grid-column:3;grid-row:1}.pf-v-top{grid-column:3;grid-row:2}.pf-grid{grid-column:1;grid-row:3}.pf-h-left{grid-column:2;grid-row:3}.pf-core{grid-column:3;grid-row:3}.pf-h-right{grid-column:4;grid-row:3}.pf-home{grid-column:5;grid-row:3}.pf-v-bottom{grid-column:3;grid-row:4}.pf-battery{grid-column:3;grid-row:5}
-.pf-board{grid-template-rows:minmax(108px,auto) 58px minmax(108px,auto) 58px minmax(108px,auto)}
-.pf-line{position:relative;opacity:.28;transition:opacity .25s,filter .25s}.pf-line::before{content:"";position:absolute;border-radius:99px;background:#334155}.pf-line::after{content:"";position:absolute;opacity:0}
-.pf-line.pf-h{width:100%;height:20px}.pf-line.pf-h::before{left:0;right:0;top:9px;height:3px}.pf-line.pf-v{width:20px;height:100%}.pf-line.pf-v::before{top:0;bottom:0;left:9px;width:3px}
-.pf-line.active{opacity:1;filter:drop-shadow(0 0 7px var(--pf-line))}.pf-line.active::before{background:var(--pf-line)}
-.pf-line.active::after{opacity:1;width:9px;height:9px;border-radius:50%;background:#fff;box-shadow:0 0 12px 3px var(--pf-line)}
-.pf-line.pf-h.active::after{top:6px;animation:pfMoveH 1.5s linear infinite}.pf-line.pf-v.active::after{left:6px;animation:pfMoveV 1.5s linear infinite}
-.pf-line.reverse.pf-h.active::after{animation-direction:reverse}.pf-line.reverse.pf-v.active::after{animation-direction:reverse}
-@keyframes pfMoveH{from{left:0}to{left:calc(100% - 9px)}}@keyframes pfMoveV{from{top:0}to{top:calc(100% - 9px)}}
-.pf-summary{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px;margin-top:10px}.pf-stat{background:#0b1322;border:1px solid #263548;border-radius:12px;padding:10px}.pf-stat small{display:block;color:#94a3b8}.pf-stat b{display:block;margin-top:4px;font-size:16px}
-.pf-hidden{display:none!important}.pf-offline .pf-node{opacity:.48}.pf-offline .pf-line{opacity:.12}
-@media(max-width:720px){.pf-board{grid-template-columns:minmax(92px,1fr) 42px minmax(108px,1.15fr) 42px minmax(92px,1fr);padding-left:0;padding-right:0}.pf-node{min-height:82px;border-radius:18px;padding:7px}.pf-node b{font-size:16px}.pf-node .pf-ico{font-size:24px}.pf-summary{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:500px){.pf-board{grid-template-columns:1fr 30px 1.08fr 30px 1fr;min-height:350px}.pf-node{min-height:76px}.pf-node .pf-sub{display:none}.pf-node small{font-size:10px}.pf-node b{font-size:14px}}
-
 </style></head><body><div class="wrap">
 <h1>ANENJI · ESP32 Wi‑Fi / RS‑485</h1><div class="langbar"><span id="langLabel">Язык</span><button id="langRu" onclick="setLang('ru')">RU</button><button id="langEn" onclick="setLang('en')">EN</button></div>
 
 <div class="app-tabs" id="appTabs">
  <button class="app-tab active" data-page="overview" onclick="showTab('overview')">Обзор</button>
- <button class="app-tab" data-page="power" onclick="showTab('power')">Энергия</button>
  <button class="app-tab" data-page="battery" onclick="showTab('battery')">Батарея</button>
  <button class="app-tab" data-page="settings" onclick="showTab('settings')">Настройки</button>
  <button class="app-tab" data-page="scheduler" onclick="showTab('scheduler')">Планировщик</button>
@@ -3598,27 +3648,6 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
  <div id="infoPzemBox" data-pzem-overview class="info-box"><h3>PZEM-016 · общий ввод</h3><div id="infoPzem">—</div></div>
 </div></div>
 
-
-<div class="card pf-card"><div class="pf-head"><h2>Power Flow</h2><span id="pfLive" class="pf-live">—</span></div>
- <div id="pfBoard" class="pf-board pf-offline">
-  <div id="pfPvNode" class="pf-node pf-pv"><div class="pf-ico">☀️</div><small>PV</small><b id="pfPv">— W</b><div id="pfPvSub" class="pf-sub">—</div></div>
-  <div id="pfPvLine" class="pf-line pf-v pf-v-top"></div>
-  <div id="pfGridNode" class="pf-node pf-grid"><div class="pf-ico">⚡</div><small>Сеть</small><b id="pfGrid">— W</b><div id="pfGridSub" class="pf-sub">—</div></div>
-  <div id="pfGridLine" class="pf-line pf-h pf-h-left"></div>
-  <div class="pf-node pf-core"><div class="pf-ico">▣</div><small>ANENJI</small><b id="pfInv">— W</b><div id="pfInvSub" class="pf-sub">—</div></div>
-  <div id="pfHomeLine" class="pf-line pf-h pf-h-right"></div>
-  <div class="pf-node pf-home"><div class="pf-ico">🏠</div><small>Дом / нагрузка</small><b id="pfHome">— W</b><div id="pfHomeSub" class="pf-sub">—</div></div>
-  <div id="pfBattLine" class="pf-line pf-v pf-v-bottom"></div>
-  <div class="pf-node pf-battery"><div class="pf-ico">🔋</div><small>Батарея</small><b id="pfBatt">— %</b><div id="pfBattSub" class="pf-sub">—</div></div>
- </div>
- <div class="pf-summary">
-  <div class="pf-stat"><small>PV сейчас</small><b id="pfStatPv">—</b></div>
-  <div class="pf-stat"><small>Нагрузка</small><b id="pfStatLoad">—</b></div>
-  <div class="pf-stat"><small>Батарея</small><b id="pfStatBatt">—</b></div>
-  <div id="pfStatGridBox" class="pf-stat"><small>Общий ввод · PZEM</small><b id="pfStatGrid">—</b></div>
- </div>
- <div class="small" style="margin-top:10px">Анимация показывает направление потока. Узел сети автоматически скрывается, если PZEM отсутствует или не отвечает.</div>
-</div>
 
 <div class="card"><h2>Полная телеметрия</h2><div id="tele" class="grid"></div><div class="toolbar" style="margin-top:12px"><button onclick="statusLoad(true)">Обновить сейчас</button><span id="age" class="small"></span></div></div>
 
@@ -3683,10 +3712,10 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 <div class="small" style="margin-top:8px"><b>EFC для LiFePO4 считается по отданной ёмкости Ah:</b> суммарные разряженные Ah / опорная ёмкость Ah. Частичные разряды складываются: два разряда по 50% ≈ 1 EFC. Зарядные Ah ведутся отдельно и не удваивают число циклов. kWh сохраняются как энергетическая статистика. Контрольный разряд запускайте на SOC ≥90%: прошивка проверенно пишет RAW 2 (SBU) в регистр 301, переводя инвертор на приоритет Solar → Battery → Utility. При целевом SOC 20% прежнее значение регистра 301 восстанавливается автоматически; затем нажмите «Завершить и сохранить ёмкость». Статистика хранится в AT24C32 с CRC и кольцевой записью.</div>
 </div>
 
-<div class="card"><h2>RTC / Планировщик</h2>
+<div class="card"><h2>Время / Планировщик</h2>
 <div class="grid">
- <div class="metric"><small>RTC DS1307</small><b id="rtcState">—</b></div>
- <div class="metric"><small>Время RTC</small><b id="rtcTime">—</b></div>
+ <div class="metric"><small>Источник времени</small><b id="rtcState">—</b></div>
+ <div class="metric"><small>Текущее время</small><b id="rtcTime">—</b></div>
  <div class="metric"><small>Задачи</small><b id="rtcRuns">—</b></div>
 </div>
 <div class="netgrid" style="margin-top:10px">
@@ -3698,10 +3727,10 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 <div class="toolbar" style="margin-top:10px">
  <button onclick="rtcSyncBrowser()">Синхронизировать с браузером</button>
  <button onclick="rtcSyncNtp()">Синхронизировать NTP</button>
- <button onclick="rtcLoad()">Обновить RTC</button>
+ <button onclick="rtcLoad()">Обновить время</button>
  <span id="rtcMsg" class="small"></span>
 </div>
-<div class="small" style="margin-top:8px">DS1307/совместимый RTC: SDA GPIO21, SCL GPIO22. AT24C32 определяется автоматически на 0x50…0x57. Планировщик работает автономно без Wi‑Fi.</div>
+<div class="small" style="margin-top:8px"><b>DS1307 и AT24C32 опциональны.</b> Без RTC после загрузки время автоматически берётся по NTP; если сеть недоступна — его можно задать кнопкой «Синхронизировать с браузером». После получения времени программные часы и планировщик продолжают работать без Wi‑Fi до следующей перезагрузки. Задания планировщика хранятся в NVS. Без AT24C32 накопительная статистика батареи и T1/T2 работает в RAM, но не сохраняется после перезагрузки.</div>
 <div class="scroll" style="margin-top:12px">
 <table><thead><tr><th>#</th><th>Вкл</th><th>Дни</th><th>Время</th><th>Регистр</th><th>RAW</th><th></th></tr></thead><tbody id="schedBody"></tbody></table>
 </div>
@@ -3977,33 +4006,6 @@ window.addEventListener('resize',schedulePzemHouseFlowLayout,{passive:true});
 window.addEventListener('load',schedulePzemHouseFlowLayout);
 
 
-function renderPowerFlowCard(t){
- const board=$('pfBoard'); if(!board)return;
- const online=!!(window.lastStatusPacket&&window.lastStatusPacket.inverter_online);
- board.classList.toggle('pf-offline',!online);
- const pv=Math.max(0,Number(t.pv_power||0));
- const load=Math.max(0,Number(t.output_active_power||0));
- const inv=Number(t.inverter_power||0);
- const bv=Number(t.battery_voltage||0),bc=Number(t.net_battery_current??t.battery_current??0),soc=Number(t.battery_soc||0);
- const battRaw=Number(t.battery_power),battW=Number.isFinite(battRaw)&&Math.abs(battRaw)>0.5?Math.abs(battRaw):Math.abs(bv*bc);
- const pz=window.lastPzem||{},gridOnline=!!pz.online&&Number.isFinite(Number(pz.power)),gridW=gridOnline?Number(pz.power):0;
- const gridNode=$('pfGridNode'),gridLine=$('pfGridLine'),gridStat=$('pfStatGridBox');
- [gridNode,gridLine,gridStat].forEach(el=>{if(el)el.classList.toggle('pf-hidden',!gridOnline)});
- $('pfPv').textContent=f(pv,0)+' W'; $('pfPvSub').textContent=`${f(t.pv_voltage,1)} V · ${f(t.pv_current,1)} A`;
- $('pfGrid').textContent=gridOnline?f(Math.abs(gridW),0)+' W':'— W'; $('pfGridSub').textContent=gridOnline?`${f(pz.voltage,1)} V · ${f(pz.current,2)} A`:'—';
- $('pfInv').textContent=f(inv,0)+' W'; $('pfInvSub').textContent=`${f(t.inverter_voltage,1)} V · ${f(t.inverter_frequency,2)} Hz`;
- $('pfHome').textContent=f(load,0)+' W'; $('pfHomeSub').textContent=`${f(t.load_percent,0)} % · ${f(t.output_current,1)} A`;
- $('pfBatt').textContent=f(soc,0)+' %'; $('pfBattSub').textContent=`${f(bv,1)} V · ${f(battW,0)} W · ${bc>0.2?'заряд':(bc<-.2?'разряд':'ожидание')}`;
- const setLine=(id,on,reverse=false)=>{const el=$(id);if(!el)return;el.classList.toggle('active',!!on);el.classList.toggle('reverse',!!reverse)};
- setLine('pfPvLine',pv>5,false);
- setLine('pfHomeLine',load>5,false);
- setLine('pfBattLine',Math.abs(bc)>0.2,bc<-.2);
- setLine('pfGridLine',gridOnline&&Math.abs(gridW)>5,gridW<0);
- $('pfStatPv').textContent=f(pv,0)+' W'; $('pfStatLoad').textContent=f(load,0)+' W'; $('pfStatBatt').textContent=`${f(soc,0)} % · ${f(battW,0)} W`;
- if($('pfStatGrid'))$('pfStatGrid').textContent=gridOnline?f(gridW,0)+' W':'—';
- if($('pfLive'))$('pfLive').textContent=online?(currentLang==='ru'?'● LIVE · '+(window.lastStatusPacket.age_ms||0)+' ms':'● LIVE · '+(window.lastStatusPacket.age_ms||0)+' ms'):(currentLang==='ru'?'● инвертор offline':'● inverter offline');
-}
-
 function renderEnergy(t){
  window.lastStatusTelemetry=t;
  // Port model. Do not combine AC, PV and battery registers into a synthetic
@@ -4037,7 +4039,7 @@ function renderEnergy(t){
  $('infoBattery').innerHTML=kv(L?'Напряжение':'Voltage',f(bv)+' V')+kv(L?'Ток':'Current',f(bc)+' A')+kv(L?'Мощность':'Power',f(battWAbs,0)+' W')+kv(L?'Направление':'Direction',bc>0.2?(L?'Заряд':'Charge'):(bc< -0.2?(L?'Разряд':'Discharge'):(L?'Ожидание':'Idle')))+kv('SOC',f(soc,0)+' %')+kv(L?'Остаток энергии':'Estimated energy',energy!=null?f(energy,2)+' kWh':'—')+(typeof autonomy!=='undefined'?kv(L?'Автономная работа':'Estimated runtime',autonomy.text)+kv(L?'Расчёт автономности':'Runtime basis',autonomy.sub):'')+kv(L?'Заряд от инвертора':'Charge from inverter',f(t.inverter_charge_current)+' A')+kv(L?'Заряд от PV':'Charge from PV',f(t.pv_charge_current)+' A');
  $('infoPv').innerHTML=kv(L?'Напряжение':'Voltage',f(t.pv_voltage)+' V')+kv(L?'Ток':'Current',f(t.pv_current)+' A')+kv(L?'Мощность PV':'PV power',f(pvIn,0)+' W')+kv(L?'Мощность зарядки PV (диагн.)':'PV charging power (diag.)',f(t.pv_charging_power,0)+' W');
  $('infoInv').innerHTML=kv(L?'Выход в нагрузку':'Load output',f(loadOut,0)+' W')+kv(L?'Мощность инвертора · reg208':'Inverter power · reg208',f(ip,0)+' W')+kv(L?'Ток силового тракта':'Power-stage current',f(t.inverter_current)+' A')+kv(L?'Напряжение выхода':'Output voltage',f(t.output_voltage)+' V')+kv(L?'Частота выхода':'Output frequency',f(t.output_frequency,2)+' Hz')+kv(L?'Полная мощность нагрузки':'Load apparent power',f(t.output_apparent_power,0)+' VA')+kv('DCDC temp',f(t.dcdc_temperature,0)+' °C')+kv('Inverter temp',f(t.inverter_temperature,0)+' °C');
- renderPowerFlowCard(t);
+
 }
 
 let browserLinkFails=0,browserLinkLostAt=0,statusLoadBusy=false,settingsWriteBusy=false;
@@ -4310,7 +4312,7 @@ const TAB_STORAGE_KEY='anenji_active_tab';
 
 
 const TAB_RULES=[
- ['Состояние / аварии','overview'],['Энергопотоки','overview'],['Power Flow','power'],['Полная телеметрия','overview'],
+ ['Состояние / аварии','overview'],['Энергопотоки','overview'],['Полная телеметрия','overview'],
  ['Связь','service'],
  ['Статистика аккумулятора','battery'],
  ['Настройки инвертора','settings'],
@@ -4321,7 +4323,7 @@ const TAB_RULES=[
 function initTabs(){
  const host=$('tabHost'); if(!host)return;
  const pages={};
- for(const id of ['overview','power','battery','settings','scheduler','network','service']){const p=document.createElement('div');p.id='tab-'+id;p.className='tab-page';host.appendChild(p);pages[id]=p}
+ for(const id of ['overview','battery','settings','scheduler','network','service']){const p=document.createElement('div');p.id='tab-'+id;p.className='tab-page';host.appendChild(p);pages[id]=p}
  const cards=[...document.querySelectorAll('.wrap>.card')];
  for(const c of cards){
    const h=c.querySelector('h2'); const title=h?h.textContent.trim():''; let page='service';
@@ -4425,30 +4427,28 @@ async function batteryStatsReset(all){
 async function rtcLoad(){
  try{
   const r=await api('/api/rtc');
-  $('rtcState').textContent=r.present?((r.type||'RTC')+' · '+(r.valid?'OK':'НЕТ ВРЕМЕНИ')):'НЕ НАЙДЕН';
+  const srcRu={rtc:'RTC',ntp:'NTP',browser:'Браузер',none:'Нет времени'};
+  const srcEn={rtc:'RTC',ntp:'NTP',browser:'Browser',none:'No time'};
+  const src=(currentLang==='ru'?srcRu:srcEn)[r.source]||r.source||(currentLang==='ru'?'Нет времени':'No time');
+  $('rtcState').textContent=r.valid?`${src}${r.present?(currentLang==='ru'?' · RTC есть':' · RTC present'):(currentLang==='ru'?' · программные часы':' · software clock')}`:(currentLang==='ru'?'НЕТ ВРЕМЕНИ':'NO TIME');
   $('rtcTime').textContent=r.time||'—';
   $('rtcRuns').textContent=`${r.runs} / ${r.errors}`;
-  $('rtcMsg').textContent=(r.ntp_synced?('NTP '+(r.ntp_server||'')+' · OK · коррекция '+r.ntp_last_correction_s+' с · '+r.ntp_sync_age_s+' с назад'):(r.last||''));
-  const known=['pool.ntp.org','time.google.com','time.cloudflare.com'], ns=r.ntp_server||'pool.ntp.org';
-  if(known.includes(ns)){$('ntpServerSelect').value=ns;$('ntpServerCustom').value='';$('ntpServerCustom').disabled=true;}else{$('ntpServerSelect').value='custom';$('ntpServerCustom').value=ns;$('ntpServerCustom').disabled=false;}
-  $('ntpUtcOffset').value=((r.ntp_utc_offset_min??180)/60).toFixed(2).replace(/\.00$/,'');
-  const s=await api('/api/schedule'); renderSchedule(s.tasks);
+  if($('rtcMsg')) $('rtcMsg').textContent=`RTC: ${r.present?(currentLang==='ru'?'есть':'present'):(currentLang==='ru'?'нет':'absent')} · EEPROM: ${r.eeprom_present?(currentLang==='ru'?'есть':'present'):(currentLang==='ru'?'нет':'absent')}${r.last?' · '+r.last:''}`;
+  if($('ntpServerSelect')){
+   const known=['pool.ntp.org','time.google.com','time.cloudflare.com'];
+   const v=known.includes(r.ntp_server)?r.ntp_server:'custom'; $('ntpServerSelect').value=v;
+   $('ntpServerCustom').disabled=v!=='custom'; $('ntpServerCustom').value=v==='custom'?(r.ntp_server||''):'';
+   $('ntpUtcOffset').value=((r.ntp_utc_offset_min??180)/60).toFixed(2).replace(/\.00$/,'');
+  }
+  const sched=await api('/api/schedule'); renderSchedule(sched.tasks);
  }catch(e){$('rtcMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
 }
-function ntpServerChoice(){ $('ntpServerCustom').disabled=$('ntpServerSelect').value!=='custom'; }
-async function ntpSave(){
- const sel=$('ntpServerSelect').value, server=(sel==='custom'?$('ntpServerCustom').value.trim():sel);
- const utcHours=Number($('ntpUtcOffset').value), utc_offset_min=Math.round(utcHours*60);
- if(!server){$('rtcMsg').innerHTML='<span class=bad>Укажите NTP сервер</span>';return;}
- if(!Number.isFinite(utcHours)||utcHours < -12||utcHours > 14){$('rtcMsg').innerHTML='<span class=bad>UTC должен быть от -12 до +14</span>';return;}
- try{const h=await verifiedAdminHeaders('rtcMsg');if(!h)return;await api('/api/rtc/ntp/config',{method:'POST',headers:h,body:JSON.stringify({server,utc_offset_min})});$('rtcMsg').innerHTML='<span class=ok>NTP/UTC сохранены: '+server+' · UTC'+(utcHours>=0?'+':'')+utcHours+'</span>';await rtcLoad();}catch(e){$('rtcMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
-}
 async function rtcSyncBrowser(){
- const d=new Date();
- const body={year:d.getFullYear(),month:d.getMonth()+1,day:d.getDate(),hour:d.getHours(),minute:d.getMinutes(),second:d.getSeconds()};
+ const d=new Date(),body={year:d.getFullYear(),month:d.getMonth()+1,day:d.getDate(),hour:d.getHours(),minute:d.getMinutes(),second:d.getSeconds()};
  try{
-  await api('/api/rtc/set',{method:'POST',headers:adminHeaders(),body:JSON.stringify(body)});
-  $('rtcMsg').innerHTML='<span class=ok>'+(currentLang==='ru'?'RTC синхронизирован':'RTC synchronized')+'</span>';
+  const h=await verifiedAdminHeaders('rtcMsg'); if(!h)return;
+  const r=await api('/api/rtc/set',{method:'POST',headers:h,body:JSON.stringify(body)});
+  $('rtcMsg').innerHTML='<span class=ok>'+(currentLang==='ru'?'Время установлено из браузера':'Time set from browser')+(r.rtc_persisted?(currentLang==='ru'?' и записано в RTC':' and persisted to RTC'):(currentLang==='ru'?' · программный ход':' · software clock'))+'.</span>';
   await rtcLoad();
  }catch(e){$('rtcMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
 }
@@ -4899,7 +4899,7 @@ void setup() {
   Wire.setTimeOut(50);  // prevent a stuck RTC/I2C bus from blocking the web loop
   RtcDateTime bootRtc;
   rtcPresent = rtcRead(bootRtc);
-  if (rtcPresent) { rtcCached=bootRtc; rtcCachedAtMs=millis(); }
+  if (rtcPresent && bootRtc.valid) clockCache(bootRtc,CLOCK_RTC);
   Serial.print(F("[RTC] DS1307/compatible: "));
   Serial.println(rtcPresent ? (bootRtc.valid ? F("OK") : F("present, time invalid")) : F("not found"));
   detectExternalEeprom();
