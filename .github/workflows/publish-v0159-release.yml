@@ -1,0 +1,58 @@
+name: Publish v0.15.9 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0159-release.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v0.15.9
+        uses: actions/checkout@v4
+        with:
+          ref: v0.15.9
+
+      - name: Validate embedded JavaScript
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino').read_text(encoding='utf-8')
+          m=re.search(r'R"HTML\((.*?)\)HTML"',s,re.S)
+          scripts=re.findall(r'<script>(.*?)</script>',m.group(1),re.S) if m else []
+          if not scripts: raise SystemExit('embedded JavaScript not found')
+          Path('/tmp/embedded.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/embedded.js
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile binaries
+        run: |
+          mkdir -p build/anenji build/release
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build/anenji firmware/ANENJI_ESP32_Controller
+          cp build/anenji/ANENJI_ESP32_Controller.ino.bin build/release/ANENJI_ESP32_Controller-v0.15.9.bin
+          cp build/anenji/ANENJI_ESP32_Controller.ino.bootloader.bin build/release/ANENJI_ESP32_Controller-v0.15.9-bootloader.bin
+          cp build/anenji/ANENJI_ESP32_Controller.ino.partitions.bin build/release/ANENJI_ESP32_Controller-v0.15.9-partitions.bin
+          sha256sum build/release/*.bin > build/release/SHA256SUMS-v0.15.9.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.15.9 >/dev/null 2>&1; then
+            gh release upload v0.15.9 build/release/* --clobber
+          else
+            gh release create v0.15.9 build/release/* --title 'ANENJI ESP32 v0.15.9' --generate-notes
+          fi
