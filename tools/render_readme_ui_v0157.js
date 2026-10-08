@@ -1,6 +1,7 @@
 const { chromium } = require('playwright-core');
 const { execFileSync } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 
 function chromePath() {
   for (const p of ['/usr/bin/google-chrome','/usr/bin/chromium','/usr/bin/chromium-browser']) {
@@ -16,10 +17,15 @@ async function switchPage(page, id) {
     b.click();
     window.scrollTo(0,0);
   }, id);
-  await page.waitForTimeout(350);
+  await page.waitForTimeout(450);
 }
 
 (async () => {
+  fs.mkdirSync('docs/media', {recursive:true});
+  for (const name of fs.readdirSync('docs/media')) {
+    if (/^ui-v0157-.*\.png$/.test(name)) fs.unlinkSync(path.join('docs/media', name));
+  }
+
   const browser = await chromium.launch({headless:true, executablePath:chromePath(), args:['--no-sandbox']});
   const page = await browser.newPage({viewport:{width:1440,height:900}, deviceScaleFactor:1});
 
@@ -53,36 +59,37 @@ async function switchPage(page, id) {
   await page.goto('file:///tmp/ui.html');
   await page.waitForTimeout(1400);
 
-  const pageDefs = [
-    ['overview', [[1440,900],[430,900]]],
-    ['battery', [[1440,900],[768,900],[430,900]]],
-    ['settings', [[1440,900],[768,900],[430,900]]],
-    ['scheduler', [[1440,900],[430,900]]],
-    ['network', [[1440,900],[430,900]]],
-    ['service', [[1440,900],[430,900]]]
+  const pageIds = ['overview','battery','settings','scheduler','network','service'];
+  const views = [
+    {name:'desktop', width:1440, height:900},
+    {name:'mobile', width:430, height:900}
   ];
 
-  for (const [id, views] of pageDefs) {
+  for (const id of pageIds) {
     for (let i=0;i<views.length;i++) {
-      const [width,height] = views[i];
-      await page.setViewportSize({width,height});
+      const view = views[i];
+      await page.setViewportSize({width:view.width,height:view.height});
       await switchPage(page,id);
-      await page.screenshot({path:`docs/media/ui-v0157-${id}-${i+1}.png`, fullPage:false});
+      await page.screenshot({path:`docs/media/ui-v0157-${id}-${i+1}.png`, fullPage:true});
     }
   }
   await browser.close();
 
-  const shots = [];
-  for (const id of ['overview','battery','settings','scheduler','network','service']) {
-    shots.push(`docs/media/ui-v0157-${id}-1.png`);
-  }
-  execFileSync('convert', ['-delay','85','-loop','0', ...shots, '-resize','900x', 'docs/media/ui-v0157-preview.gif'], {stdio:'inherit'});
+  const previewShots = pageIds.map(id => `docs/media/ui-v0157-${id}-1.png`);
+  execFileSync('convert', [
+    '-delay','180','-loop','0', ...previewShots,
+    '-resize','900x',
+    'docs/media/ui-v0157-preview.gif'
+  ], {stdio:'inherit'});
 
-  // Fail if a page gallery accidentally contains byte-identical screenshots.
   const crypto = require('crypto');
-  for (const [id, views] of pageDefs) {
-    const hashes = views.map((_,i)=>crypto.createHash('sha256').update(fs.readFileSync(`docs/media/ui-v0157-${id}-${i+1}.png`)).digest('hex'));
-    if (new Set(hashes).size !== hashes.length) throw new Error(`duplicate screenshots for ${id}`);
+  for (const id of pageIds) {
+    const files = [1,2].map(i => `docs/media/ui-v0157-${id}-${i}.png`);
+    const hashes = files.map(file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'));
+    if (new Set(hashes).size !== 2) throw new Error(`duplicate screenshots for ${id}`);
+    for (const file of files) {
+      if (fs.statSync(file).size < 10000) throw new Error(`screenshot too small: ${file}`);
+    }
   }
-  console.log('Rendered 14 distinct responsive screenshots and short preview');
+  console.log('Rendered 12 full-page screenshots (desktop/mobile) and slower preview');
 })().catch(e => { console.error(e); process.exit(1); });
