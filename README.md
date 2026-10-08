@@ -93,15 +93,17 @@
 | Компонент | Кол-во | Обязателен | Назначение / примечание |
 |---|---:|:---:|---|
 | ESP32 DevKit / ESP32-WROOM-32 | 1 | ✅ | Основной контроллер, Wi‑Fi и Web UI |
-| TTL ↔ RS‑485 transceiver | 1 | ✅ | UART2 ↔ Modbus RTU; на фото показан типовой MAX485-модуль |
-| RTC DS1307/DS3231-compatible | 1 | ◻️ | Часы реального времени для планировщика |
-| AT24C32 | 1 | ◻️ | Persistent battery/tariff statistics и wear-levelled history |
+| TTL ↔ RS‑485 transceiver | 1 | ✅ | UART2 ↔ Modbus RTU; питание в этой сборке от **3.3 V** |
+| RTC DS1307/DS3231-compatible | 1 | ◻️ | Часы реального времени для планировщика; питание **3.3 V** |
+| AT24C32 | 1 | ◻️ | Persistent battery/tariff statistics и wear-levelled history; питание **3.3 V** |
 | Tiny RTC board с AT24C32 | 1 | ◻️ | Удобный вариант, объединяющий RTC и EEPROM на одной I²C-плате |
 | PZEM‑016 | 1 | ◻️ | Дополнительный измеритель на общей RS‑485-шине |
+| ADS1115 | 1 | ◻️ | 16-битный АЦП для PZCT-DC63; питание **3.3 V** |
+| PZCT-DC63 | 1 | ◻️ | Датчик DC-тока; в используемой сборке питание **3.3 V** |
 | Провода / клеммы / витая пара для A/B | по месту | ✅ | Соединение модулей и линии RS‑485 |
 | USB-кабель для ESP32 | 1 | ✅ | Первичная прошивка и Serial Monitor |
 
-> **Важно для MAX485:** у разных готовых модулей питание и TTL-уровни могут отличаться. Перед подключением `RO/DI/DE/RE` к ESP32 убедитесь по схеме именно вашей платы, что её логические уровни совместимы с 3,3 В ESP32.
+> **Питание этой сборки:** низковольтные внешние модули подключаются к выводу ESP32 **`3V3` / `3.3V`**, общий провод — к **`GND`**. Если конкретный купленный модуль по своей документации требует другое напряжение, сначала проверьте его совместимость — не ориентируйтесь только на внешний вид платы.
 
 ### Схема подключения с фото-подсказками
 
@@ -109,29 +111,39 @@
   <img src="docs/media/wiring-modules.png" alt="ESP32 MAX485 RTC AT24C32 ANENJI wiring overview" width="100%">
 </p>
 
-Ключевые соединения на схеме соответствуют прошивке: `GPIO17 → DI`, `RO → GPIO16`, `GPIO4 → DE + /RE`, `GPIO21 → SDA`, `GPIO22 → SCL`. Линия `A/B` идёт к ANENJI и при необходимости используется совместно с PZEM‑016.
+Ключевые соединения на схеме соответствуют прошивке: `GPIO17 / TX2 → DI`, `RO → GPIO16 / RX2`, `GPIO4 / D4 → DE + /RE`, `GPIO21 / SDA → SDA`, `GPIO22 / SCL → SCL`; питание модулей — от `3V3`, общий провод — `GND`. Линия `A/B` идёт к ANENJI и при необходимости используется совместно с PZEM‑016.
 
 ### ESP32 ↔ RS‑485 трансивер
 
-| ESP32 | RS‑485 модуль | Назначение |
-|---|---|---|
-| GPIO16 | RO | UART2 RX |
-| GPIO17 | DI | UART2 TX |
-| GPIO4 | DE + /RE | управление направлением half‑duplex |
-| GND | GND | общий провод |
-| — | A / B | линия RS‑485 к инвертору и, при использовании, PZEM‑016 |
+На разных ESP32 DevKit одна и та же ножка может быть подписана как `4`, `IO4`, `D4` и т. п. **Главный ориентир — номер GPIO**; колонка «Маркировка на плате» показывает распространённые варианты шелкографии.
+
+| Сигнал ESP32 | GPIO | Маркировка на плате (типично) | RS‑485 модуль | Назначение |
+|---|---:|---|---|---|
+| UART2 RX | **GPIO16** | `RX2` / `IO16` / `16` / `D16` | `RO` | приём данных от трансивера |
+| UART2 TX | **GPIO17** | `TX2` / `IO17` / `17` / `D17` | `DI` | передача данных в трансивер |
+| Direction | **GPIO4** | `D4` / `IO4` / `4` | `DE + /RE` | управление направлением half‑duplex |
+| Питание | — | **`3V3` / `3.3V`** | `VCC` | питание модуля от 3.3 V |
+| Земля | — | **`GND`** | `GND` | общий провод |
+| RS‑485 | — | — | `A / B` | линия к инвертору и, при использовании, PZEM‑016 |
+
+> В этой сборке внешние низковольтные модули питаются от **3.3 V**. Не используйте `VIN/5V` как питание модулей этой схемы. Для конкретного RS‑485-модуля всё равно проверьте, что он действительно рассчитан на питание и логические уровни 3.3 V.
 
 Параметры UART в прошивке: **9600 baud, 8N1**.
 
-### ESP32 ↔ RTC / EEPROM
+<p align="center">
+  <img src="docs/media/esp32-pin-labels-3v3.svg" alt="ESP32 DevKit pin labels for ANENJI controller" width="900">
+</p>
 
-| ESP32 | I²C | Устройство |
-|---|---|---|
-| GPIO21 | SDA | DS1307/DS3231 + AT24C32 |
-| GPIO22 | SCL | DS1307/DS3231 + AT24C32 |
-| GND | GND | общий провод |
+### ESP32 ↔ RTC / EEPROM / ADS1115
 
-Адрес RTC: `0x68`. AT24C32 ищется в диапазоне `0x50..0x57`. I²C работает на 100 кГц.
+| Сигнал ESP32 | GPIO | Маркировка на плате (типично) | I²C модуль |
+|---|---:|---|---|
+| SDA | **GPIO21** | `SDA` / `D21` / `IO21` / `21` | `SDA` RTC / AT24C32 / ADS1115 |
+| SCL | **GPIO22** | `SCL` / `D22` / `IO22` / `22` | `SCL` RTC / AT24C32 / ADS1115 |
+| Питание | — | **`3V3` / `3.3V`** | `VCC/VDD` модулей |
+| Земля | — | **`GND`** | `GND` |
+
+Адрес RTC: `0x68`. AT24C32 ищется в диапазоне `0x50..0x57`. ADS1115 — `0x48..0x4B`. I²C работает на 100 кГц.
 
 ```mermaid
 flowchart LR
@@ -141,14 +153,23 @@ flowchart LR
     PZ[PZEM-016\noptional]
     RTC[DS1307 / DS3231-compatible]
     EE[AT24C32 4 KiB]
+    ADC[ADS1115]
+    HALL[PZCT-DC63]
 
-    ESP -- GPIO17 TX --> XCVR
-    XCVR -- RO / GPIO16 RX --> ESP
-    ESP -- GPIO4 DE+/RE --> XCVR
+    ESP -- GPIO17 / TX2 --> XCVR
+    XCVR -- RO / GPIO16 / RX2 --> ESP
+    ESP -- GPIO4 / D4 DE+/RE --> XCVR
     XCVR <-- A/B RS-485 --> INV
     XCVR <-- shared A/B --> PZ
-    ESP <-- GPIO21/22 I2C --> RTC
-    ESP <-- GPIO21/22 I2C --> EE
+    ESP <-- GPIO21 SDA / GPIO22 SCL --> RTC
+    ESP <-- GPIO21 SDA / GPIO22 SCL --> EE
+    ESP <-- GPIO21 SDA / GPIO22 SCL --> ADC
+    HALL -- OUT --> ADC
+    ESP -- 3V3 + GND --> XCVR
+    ESP -- 3V3 + GND --> RTC
+    ESP -- 3V3 + GND --> EE
+    ESP -- 3V3 + GND --> ADC
+    ESP -- 3V3 + GND --> HALL
 ```
 
 > **Важно:** A/B иногда маркируются производителями наоборот. Если обмена нет, сначала проверьте распиновку вашего трансивера и инвертора. Не подключайте ESP32 напрямую к A/B без RS‑485-трансивера.
@@ -159,7 +180,7 @@ flowchart LR
 
 Прошивка поддерживает опциональный датчик Холла **PZCT-DC63** через **ADS1115** на общей I²C-шине (`GPIO21/22`). В Web UI отображаются ток и напряжение входа АЦП; доступны калибровка нуля и калибровка по известному току.
 
-Два безопасных варианта схемы подключения и порядок калибровки: **[docs/hall-current-ads1115.md](docs/hall-current-ads1115.md)**.
+В используемой сборке ADS1115 и PZCT-DC63 питаются от **3.3 V (`3V3`)**. Схема подключения, варианты маркировки GPIO на плате и порядок калибровки: **[docs/hall-current-ads1115.md](docs/hall-current-ads1115.md)**.
 
 
 ## Архитектура
@@ -372,19 +393,15 @@ X-ANENJI-Admin: <admin-password>
 │       └── ANENJI_ESP32_Controller.ino
 ├── docs/
 │   ├── media/
-│   │   ├── demo.gif
-│   │   ├── demo.mp4
-│   │   ├── dashboard.webp
-│   │   ├── battery-stats.webp
-│   │   ├── rtc-scheduler.webp
-│   │   ├── network-modbus.webp
-│   │   ├── service-pzem-ota.webp
+│   │   ├── current-overview.webp
 │   │   ├── module-esp32-devkit.webp
 │   │   ├── module-max485.webp
 │   │   ├── module-tiny-rtc-at24c32.webp
+│   │   ├── esp32-pin-labels-3v3.svg
 │   │   ├── rj45-rs485-pinout.svg
 │   │   ├── rj45-rs485-bms-connection.png
 │   │   └── wiring-modules.png
+│   ├── hall-current-ads1115.md
 │   ├── screenshots.md
 │   ├── api.md
 │   ├── architecture.md
