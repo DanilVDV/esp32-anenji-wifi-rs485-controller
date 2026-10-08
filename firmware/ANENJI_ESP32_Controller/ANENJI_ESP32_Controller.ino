@@ -169,6 +169,7 @@ struct ProfileApplyResult {
 struct InverterEvent {
   uint32_t id;
   uint32_t uptimeSec;
+  char timestamp[20]; // YYYY-MM-DD HH:MM:SS, empty until logical clock is valid
   uint8_t type;      // 1=fault, 2=warning, 3=mode
   uint8_t bit;       // 0..31 for masks, 255 for mode
   uint8_t code;      // mode value for type=3
@@ -507,8 +508,8 @@ HardwareSerial RS485(2);
 WebServer web(80);
 
 
-const char* FW_VERSION = "0.15.7";
-const char* FW_VERSION_PREVIOUS = "0.15.6";
+const char* FW_VERSION = "0.15.8";
+const char* FW_VERSION_PREVIOUS = "0.15.7";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -1173,6 +1174,11 @@ void appendInverterEvent(uint8_t type, uint8_t bit, uint8_t code, bool active,
   InverterEvent e = {};
   e.id = inverterEventNextId++;
   e.uptimeSec = millis()/1000UL;
+  RtcDateTime eventDt = {};
+  if (clockNow(eventDt)) {
+    snprintf(e.timestamp, sizeof(e.timestamp), "%04u-%02u-%02u %02u:%02u:%02u",
+             eventDt.year, eventDt.month, eventDt.day, eventDt.hour, eventDt.minute, eventDt.second);
+  }
   e.type = type; e.bit = bit; e.code = code; e.active = active;
   snprintf(e.severity, sizeof(e.severity), "%s", severity ? severity : "INFO");
   snprintf(e.message, sizeof(e.message), "%s", message ? message : "");
@@ -2578,6 +2584,7 @@ void handleEvents() {
     uint8_t idx=(uint8_t)((head+INVERTER_EVENT_CAPACITY-1-n)%INVERTER_EVENT_CAPACITY); InverterEvent e;
     portENTER_CRITICAL(&inverterEventMux); e=inverterEvents[idx]; portEXIT_CRITICAL(&inverterEventMux);
     if(n)j+=','; j+=F("{\"id\":");j+=e.id; j+=F(",\"uptime_s\":");j+=e.uptimeSec;
+    j+=F(",\"timestamp\":"); if(e.timestamp[0]){j+='"';j+=e.timestamp;j+='"';}else j+=F("null");
     j+=F(",\"type\":\"");j+=e.type==1?F("fault"):(e.type==2?F("warning"):F("mode"));j+='"';
     j+=F(",\"severity\":\"");j+=e.severity;j+='"'; j+=F(",\"bit\":");if(e.bit==255)j+=F("null");else j+=e.bit;
     j+=F(",\"code\":");j+=e.code; j+=F(",\"active\":");j+=e.active?F("true"):F("false");
@@ -3953,7 +3960,7 @@ function renderAlerts(x){
 }
 async function eventsLoad(force=false){
  const now=Date.now();if(!force&&now-lastEventLoadMs<9000)return;lastEventLoadMs=now;
- try{const x=await api('/api/events',{timeoutMs:2200}),ev=Array.isArray(x.events)?x.events:[];if(!$('eventLog'))return;$('eventLog').innerHTML=ev.length?ev.slice(0,24).map(e=>{const cls=e.severity==='CRITICAL'?'critical':(e.severity==='WARNING'?'warning':'');const state=e.type==='mode'?'':(e.active?'RAISED':'CLEARED');return `<div class="alert-row ${cls} ${e.active?'':'clear'}"><b>${e.severity} · ${e.type.toUpperCase()} ${state}</b><small>${e.message} · uptime ${e.uptime_s}s</small></div>`}).join(''):'<div class="small">Событий пока нет.</div>';}catch(e){}
+ try{const x=await api('/api/events',{timeoutMs:2200}),ev=Array.isArray(x.events)?x.events:[];if(!$('eventLog'))return;$('eventLog').innerHTML=ev.length?ev.slice(0,24).map(e=>{const cls=e.severity==='CRITICAL'?'critical':(e.severity==='WARNING'?'warning':'');const state=e.type==='mode'?'':(e.active?'RAISED':'CLEARED');const when=e.timestamp?e.timestamp:(`uptime ${e.uptime_s}s`);return `<div class="alert-row ${cls} ${e.active?'':'clear'}"><b>${when} · ${e.severity} · ${e.type.toUpperCase()} ${state}</b><small>${e.message}</small></div>`}).join(''):'<div class="small">Событий пока нет.</div>';}catch(e){}
 }
 let autonomyAvgW=null,autonomyLastMs=0;
 
