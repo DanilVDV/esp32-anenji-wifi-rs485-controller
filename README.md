@@ -2,7 +2,7 @@
 
 Прошивка для **ESP32-WROOM-32 / ESP32 Dev Module**, предназначенная для локального мониторинга и управления инвертором **ANENJI ANJ-4000W-24V-WIFI** по Modbus RTU/RS‑485.
 
-Текущая версия прошивки: **0.15.7**.
+Текущая версия прошивки: **0.15.8**.
 
 ## Подключение к инвертору
 
@@ -39,37 +39,13 @@
 
 ## Демонстрация Web UI
 
-Короткое превью актуального интерфейса **v0.15.7** — кадры переключаются медленнее, чтобы интерфейс можно было рассмотреть:
+Актуальный рабочий интерфейс контроллера:
 
-<p align="center"><img src="docs/media/ui-v0157-preview.gif" alt="ANENJI ESP32 Web UI v0.15.7 preview" width="900"></p>
+<p align="center">
+  <img src="docs/media/current-overview.webp" alt="ANENJI ESP32 Web UI" width="700">
+</p>
 
-Для каждой страницы показаны **2 полных скриншота без обрезки содержимого**: desktop и mobile. Так видна вся страница целиком, а не только случайный участок viewport.
-
-### Обзор
-<p align="center"><img src="docs/media/ui-v0157-overview-1.png" width="95%"></p>
-<p align="center"><img src="docs/media/ui-v0157-overview-2.png" width="48%"></p>
-
-### Батарея
-<p align="center"><img src="docs/media/ui-v0157-battery-1.png" width="95%"></p>
-<p align="center"><img src="docs/media/ui-v0157-battery-2.png" width="48%"></p>
-
-### Настройки
-<p align="center"><img src="docs/media/ui-v0157-settings-1.png" width="95%"></p>
-<p align="center"><img src="docs/media/ui-v0157-settings-2.png" width="48%"></p>
-
-### Планировщик
-<p align="center"><img src="docs/media/ui-v0157-scheduler-1.png" width="95%"></p>
-<p align="center"><img src="docs/media/ui-v0157-scheduler-2.png" width="48%"></p>
-
-### Сеть
-<p align="center"><img src="docs/media/ui-v0157-network-1.png" width="95%"></p>
-<p align="center"><img src="docs/media/ui-v0157-network-2.png" width="48%"></p>
-
-### Сервис
-<p align="center"><img src="docs/media/ui-v0157-service-1.png" width="95%"></p>
-<p align="center"><img src="docs/media/ui-v0157-service-2.png" width="48%"></p>
-
-> Скриншоты генерируются из Web UI той же версии прошивки. README больше не использует старые `demo.gif`, `demo.mp4` и прежние обрезанные кадры.
+> В README оставлен только этот актуальный снимок реального интерфейса. Старые preview/GIF и автоматически сгенерированные галереи больше не используются.
 
 ## Возможности
 
@@ -78,6 +54,7 @@
 - чтение телеметрии ANENJI каждые ~2 с;
 - чтение и изменение разрешённого набора Modbus-регистров с проверкой диапазонов и взаимосвязей;
 - полный warning map bit0..20, включая lithium communication и превышение тока разряда;
+- журнал событий с локальной датой и временем после синхронизации RTC/NTP/браузером;
 - отображение masked и unmasked warning-кодов;
 - подтверждённые R/W `316` (dry contact) и `338` (automatic mains output);
 - регистр `344` помечен reserved и заблокирован для записи;
