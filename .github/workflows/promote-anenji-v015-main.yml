@@ -1,4 +1,4 @@
-name: Promote cleanup v0.15.3 to main
+name: Promote power flow v0.15.4 to main
 
 on:
   push:
@@ -28,10 +28,10 @@ jobs:
           path: patchsrc
           fetch-depth: 1
 
-      - name: Apply cleanup patch
-        run: python3 patchsrc/tools/apply_cleanup_v0_15_3.py base
+      - name: Apply power flow patch
+        run: python3 patchsrc/tools/apply_powerflow_v0_15_4.py base
 
-      - name: Validate cleanup and embedded JavaScript
+      - name: Validate power flow UI and embedded JavaScript
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -39,17 +39,25 @@ jobs:
           p=Path('base/firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
           s=p.read_text(encoding='utf-8')
           req=[
-            'const char* FW_VERSION = "0.15.3";',
-            'data-pzem-overview',
-            'const pzemOverviewVisible=!!pz.online;',
-            "document.querySelectorAll('[data-pzem-overview]')",
-            'if(!pzemOverviewVisible)hidePzemHouseFlow();'
+            'const char* FW_VERSION = "0.15.4";',
+            'data-page="power"',
+            '<h2>Power Flow</h2>',
+            "['Power Flow','power']",
+            "['overview','power','battery','settings','scheduler','network','service']",
+            'function renderPowerFlowCard(t)',
+            "renderPowerFlowCard(t);",
+            "gridOnline=!!pz.online",
+            "classList.toggle('pf-hidden',!gridOnline)",
+            '@keyframes pfMoveH',
+            '@keyframes pfMoveV'
           ]
           missing=[x for x in req if x not in s]
           if missing: raise SystemExit('Missing: '+repr(missing))
           forbidden=['WiFiUdp.h','DATALOGGER_UDP_PORT','dataloggerServiceMode','handleDatalogger','/api/datalogger/','<h2>Datalogger</h2>','async function dlReq']
           found=[x for x in forbidden if x in s]
           if found: raise SystemExit('Datalogger leftovers: '+repr(found))
+          if s.count('id="pfBoard"') != 1: raise SystemExit('pfBoard duplicate/missing')
+          if s.count('data-page="power"') != 1: raise SystemExit('power tab duplicate/missing')
           m=re.search(r'<script>(.*?)</script>',s,re.S)
           if not m: raise SystemExit('embedded JS not found')
           Path('/tmp/ui.js').write_text(m.group(1),encoding='utf-8')
@@ -63,5 +71,5 @@ jobs:
           git config user.name "ChatGPT"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
-          git commit -m "Remove datalogger controls and hide absent PZEM overview"
+          git commit -m "Add dedicated EyeBond-style power flow tab"
           git push origin HEAD:main
