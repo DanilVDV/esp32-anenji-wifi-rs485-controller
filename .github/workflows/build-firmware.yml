@@ -1,0 +1,71 @@
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/build-firmware.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/build-firmware.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate embedded JavaScript
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
+          s = p.read_text(encoding='utf-8')
+          m = re.search(r'R"HTML\((.*?)\)HTML"', s, re.S)
+          if not m:
+              raise SystemExit('Embedded HTML block not found')
+          scripts = re.findall(r'<script>(.*?)</script>', m.group(1), re.S)
+          if not scripts:
+              raise SystemExit('Embedded JavaScript not found')
+          Path('/tmp/embedded.js').write_text('\n'.join(scripts), encoding='utf-8')
+          PY
+          node --check /tmp/embedded.js
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Arduino core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile ESP32 Dev Module
+        run: |
+          mkdir -p build/anenji
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32 \
+            --output-dir build/anenji \
+            firmware/ANENJI_ESP32_Controller
+
+      - name: Show build outputs
+        run: ls -lh build/anenji
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ANENJI-ESP32-firmware-${{ github.sha }}
+          path: |
+            build/anenji/*.bin
+            build/anenji/*.elf
+            build/anenji/*.map
+          if-no-files-found: error
+          retention-days: 30
