@@ -2,7 +2,8 @@ name: Apply current README screenshot
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - .github/workflows/apply-readme-current-screenshot.yml
 
@@ -13,54 +14,33 @@ jobs:
   apply:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout main
+        uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 1
-      - name: Assemble uploaded screenshot
+      - name: Load staged screenshot and helper
         run: |
           git fetch origin chatgpt/anenji-alerts-v0.15.0
+          git show origin/chatgpt/anenji-alerts-v0.15.0:tools/apply_readme_current_screenshot.py > /tmp/apply_readme.py
           : > /tmp/current-overview.b64
-          for i in 00 01 02 03 04 05 06; do
-            git show origin/chatgpt/anenji-alerts-v0.15.0:tools/readme-shot/part${i}.b64 >> /tmp/current-overview.b64
-          done
+          for i in 00 01 02 03 04 05 06; do git show origin/chatgpt/anenji-alerts-v0.15.0:tools/readme-shot/part${i}.b64 >> /tmp/current-overview.b64; done
+      - name: Build exact screenshot file
+        run: |
           mkdir -p docs/media
           base64 -d /tmp/current-overview.b64 > docs/media/current-overview.webp
           echo 'f005a13db9a172d52e2bf36ab23dbc934e29116ebb5d1332c5729027fa82917e  docs/media/current-overview.webp' | sha256sum -c -
-          file docs/media/current-overview.webp
-      - name: Keep only current screenshot in README
+      - name: Update README
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('README.md')
-          s=p.read_text(encoding='utf-8')
-          s=s.replace('Текущая версия прошивки: **0.15.7**.','Текущая версия прошивки: **0.15.8**.')
-          start=s.index('## Демонстрация Web UI')
-          end=s.index('\n## Возможности', start)
-          block='''## Демонстрация Web UI
-
-Актуальный рабочий интерфейс контроллера:
-
-<p align="center">
-  <img src="docs/media/current-overview.webp" alt="ANENJI ESP32 Web UI" width="700">
-</p>
-
-> В README оставлен только этот актуальный снимок реального интерфейса. Старые preview/GIF и автоматически сгенерированные галереи больше не используются.
-'''
-          s=s[:start]+block+s[end:]
-          marker='- полный warning map bit0..20, включая lithium communication и превышение тока разряда;'
-          extra='- журнал событий с локальной датой и временем после синхронизации RTC/NTP/браузером;'
-          if extra not in s and marker in s:
-              s=s.replace(marker, marker+'\n'+extra, 1)
-          p.write_text(s,encoding='utf-8')
-          PY
-          ! grep -q 'ui-v0157-preview.gif' README.md
-          ! grep -q 'ui-v0157-overview-' README.md
+          python3 /tmp/apply_readme.py
+          grep -q 'current-overview.webp' README.md
+          if grep -q 'ui-v0157-preview.gif' README.md; then exit 1; fi
+          if grep -q 'ui-v0157-overview-' README.md; then exit 1; fi
           git diff --check
       - name: Commit README screenshot
         run: |
-          git config user.name "ChatGPT"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name ChatGPT
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add README.md docs/media/current-overview.webp
-          git commit -m "Use current real Web UI screenshot"
+          git commit -m 'Use current real Web UI screenshot'
           git push origin HEAD:main
