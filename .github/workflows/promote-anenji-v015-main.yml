@@ -34,8 +34,6 @@ jobs:
           from pathlib import Path
           import re
 
-          # Remove the obsolete NTP-UI replacement from the core patcher. The
-          # current firmware already has the correct authorized /api/rtc/ntp UI.
           p=Path('patchsrc/tools/apply_optional_clock_v0_15_5.py')
           s=p.read_text(encoding='utf-8')
           pat=r"sub_once\(r'async function rtcSyncNtp\\\(\\\)\\\{\.\*\?\(\?=\\nasync function ntpSave\\\(\\\)\\\{\)',.*?'NTP UI sync', re\.S\)\n"
@@ -43,9 +41,6 @@ jobs:
           if n!=1: raise SystemExit(f'obsolete NTP UI patch removal failed: {n}')
           p.write_text(s2,encoding='utf-8')
 
-          # The UI fixer only needs rtcLoad() and browser-time sync. Keep the
-          # existing rtcSyncNtp() intact to avoid replacing a function that is
-          # already correct in main.
           q=Path('patchsrc/tools/fix_optional_clock_ui_v0_15_5.py')
           u=q.read_text(encoding='utf-8')
           marker="sub_once(r'async function rtcSyncNtp"
@@ -74,9 +69,9 @@ jobs:
             'clockCache(dt,CLOCK_BROWSER);',
             'uint32_t retryMs=ntpEverSynced?NTP_RETRY_MS:NTP_INITIAL_RETRY_MS;',
             'if (!clockNow(dt)) return;',
-            '\"source\":\"',
-            '\"persistent_clock\":',
-            '\"persistent_stats\":',
+            'clockSourceName()',
+            'persistent_clock',
+            'persistent_stats',
             'DS1307 и AT24C32 опциональны.',
             'Задания планировщика хранятся в NVS.',
             "const sched=await api('/api/schedule'); renderSchedule(sched.tasks);",
