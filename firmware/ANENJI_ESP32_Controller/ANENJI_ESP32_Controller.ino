@@ -506,8 +506,8 @@ HardwareSerial RS485(2);
 WebServer web(80);
 
 
-const char* FW_VERSION = "0.15.5";
-const char* FW_VERSION_PREVIOUS = "0.15.4";
+const char* FW_VERSION = "0.15.6";
+const char* FW_VERSION_PREVIOUS = "0.15.5";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -3808,7 +3808,7 @@ const UI_TEXT=[
  ['Сбросить настройки Wi‑Fi','Reset Wi‑Fi settings'],['Modbus / RS‑485','Modbus / RS‑485'],
  ['Адрес устройства Modbus RTU','Modbus RTU device address'],['Скорость','Baud rate'],['Формат','Format'],
  ['Сохранить адрес Modbus','Save Modbus address'],['Чтение регистров','Raw register explorer'],['Прочитать','Read'],
- ['Профили батареи · расширенные','Battery profiles · advanced'],['Применить','Apply'],['RTC / Планировщик','RTC / Scheduler'],['Время RTC','RTC time'],['Задачи','Tasks'],['Синхронизировать с браузером','Sync from browser'],['Обновить RTC','Refresh RTC'],['Дни','Days'],['Вкл','On'],['Регистр','Register']
+ ['Профили батареи · расширенные','Battery profiles · advanced'],['Применить','Apply'],['Время / Планировщик','Time / Scheduler'],['Время RTC','RTC time'],['Задачи','Tasks'],['Синхронизировать с браузером','Sync from browser'],['Обновить RTC','Refresh RTC'],['Дни','Days'],['Вкл','On'],['Регистр','Register']
 ];
 const UI_LOOKUP=new Map();
 UI_TEXT.forEach((p,i)=>{UI_LOOKUP.set(p[0],i);UI_LOOKUP.set(p[1],i)});
@@ -4316,7 +4316,7 @@ const TAB_RULES=[
  ['Связь','service'],
  ['Статистика аккумулятора','battery'],
  ['Настройки инвертора','settings'],
- ['RTC / Планировщик','scheduler'],
+ ['Время / Планировщик','scheduler'],
  ['Wi‑Fi / сеть ESP32','network'],['Modbus / RS‑485','network'],
  ['Чтение регистров','service']
 ];
