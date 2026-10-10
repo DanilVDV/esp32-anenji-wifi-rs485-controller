@@ -13,16 +13,26 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout v0.15.10 source
+      - name: Checkout clean v0.15.10 source
         uses: actions/checkout@v4
         with:
-          ref: a274256b1ff8312f70d5eb939c6a90891300cfe3
+          ref: 0b204c47875c415057ffa0f3d3e929bcd1419a97
           fetch-depth: 0
 
       - name: Verify firmware version
         shell: bash
         run: |
           grep -q 'const char\* FW_VERSION = "0.15.10";' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+
+      - name: Create v0.15.10 tag
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --tags origin refs/tags/v0.15.10 >/dev/null 2>&1; then
+            echo 'Tag v0.15.10 already exists'
+          else
+            git tag v0.15.10 0b204c47875c415057ffa0f3d3e929bcd1419a97
+            git push origin refs/tags/v0.15.10
+          fi
 
       - name: Validate embedded JavaScript
         shell: bash
@@ -60,16 +70,6 @@ jobs:
           cp ANENJI_ESP32_Controller.ino.partitions.bin ANENJI_ESP32_Controller-v0.15.10-partitions.bin
           sha256sum ANENJI_ESP32_Controller-v0.15.10*.bin > SHA256SUMS-v0.15.10.txt
 
-      - name: Create v0.15.10 tag
-        shell: bash
-        run: |
-          if git ls-remote --exit-code --tags origin refs/tags/v0.15.10 >/dev/null 2>&1; then
-            echo 'Tag v0.15.10 already exists'
-          else
-            git tag v0.15.10 a274256b1ff8312f70d5eb939c6a90891300cfe3
-            git push origin refs/tags/v0.15.10
-          fi
-
       - name: Create v0.15.10 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,7 +80,7 @@ jobs:
           else
             gh release create v0.15.10 \
               --title 'ANENJI ESP32 v0.15.10' \
-              --notes 'v0.15.10: substantially improved RU/EN Web UI localization. Static and dynamic UI text, statuses, dialogs, service text and dynamically created elements are translated. Firmware is identical to commit 058ce8d9745e8c81770c859a1f533d719a349ad0; tag points to cleanup commit a274256b1ff8312f70d5eb939c6a90891300cfe3.' \
+              --notes 'v0.15.10: substantially improved RU/EN Web UI localization. Static and dynamic UI text, statuses, dialogs, service text and dynamically created elements are translated. Release tag uses clean firmware-only commit 0b204c47875c415057ffa0f3d3e929bcd1419a97.' \
               build/release/ANENJI_ESP32_Controller-v0.15.10.bin \
               build/release/ANENJI_ESP32_Controller-v0.15.10-bootloader.bin \
               build/release/ANENJI_ESP32_Controller-v0.15.10-partitions.bin \
