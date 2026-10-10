@@ -1,0 +1,79 @@
+name: Publish v0.15.10 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release-v01510.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v0.15.10 source
+        uses: actions/checkout@v4
+        with:
+          ref: 058ce8d9745e8c81770c859a1f533d719a349ad0
+
+      - name: Verify firmware version
+        shell: bash
+        run: |
+          grep -q 'const char\* FW_VERSION = "0.15.10";' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+
+      - name: Validate embedded JavaScript
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino').read_text(encoding='utf-8')
+          start=s.index('<script>')+len('<script>')
+          end=s.index('</script>',start)
+          Path('/tmp/anenji-ui.js').write_text(s[start:end],encoding='utf-8')
+          PY
+          node --check /tmp/anenji-ui.js
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core
+        shell: bash
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile v0.15.10
+        shell: bash
+        run: |
+          mkdir -p build/release
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build/release firmware/ANENJI_ESP32_Controller
+          ls -lh build/release
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          cd build/release
+          cp ANENJI_ESP32_Controller.ino.bin ANENJI_ESP32_Controller-v0.15.10.bin
+          cp ANENJI_ESP32_Controller.ino.bootloader.bin ANENJI_ESP32_Controller-v0.15.10-bootloader.bin
+          cp ANENJI_ESP32_Controller.ino.partitions.bin ANENJI_ESP32_Controller-v0.15.10-partitions.bin
+          sha256sum ANENJI_ESP32_Controller-v0.15.10*.bin > SHA256SUMS-v0.15.10.txt
+
+      - name: Create v0.15.10 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view v0.15.10 >/dev/null 2>&1; then
+            echo 'Release v0.15.10 already exists'
+          else
+            gh release create v0.15.10 \
+              --target 058ce8d9745e8c81770c859a1f533d719a349ad0 \
+              --title 'ANENJI ESP32 v0.15.10' \
+              --notes 'v0.15.10: substantially improved RU/EN Web UI localization. Static and dynamic UI text, statuses, dialogs, service text and dynamically created elements are translated. Built automatically from commit 058ce8d9745e8c81770c859a1f533d719a349ad0.' \
+              build/release/ANENJI_ESP32_Controller-v0.15.10.bin \
+              build/release/ANENJI_ESP32_Controller-v0.15.10-bootloader.bin \
+              build/release/ANENJI_ESP32_Controller-v0.15.10-partitions.bin \
+              build/release/SHA256SUMS-v0.15.10.txt
+          fi
