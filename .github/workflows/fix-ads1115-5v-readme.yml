@@ -1,0 +1,50 @@
+name: Fix ADS1115 5V README
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-ads1115-5v-readme.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Correct ADS1115 power and I2C wiring in README
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('README.md')
+          s=p.read_text(encoding='utf-8')
+          replacements={
+          '| ADS1115 | 1 | ◻️ | 16-битный АЦП для PZCT-DC63; питание **3.3 V** |': '| ADS1115 | 1 | ◻️ | 16-битный АЦП для PZCT-DC63; питание **5 V**; I²C к ESP32 через согласование уровней |',
+          '> **Питание этой сборки:** низковольтные внешние модули подключаются к выводу ESP32 **`3V3` / `3.3V`**, общий провод — к **`GND`**. Если конкретный купленный модуль по своей документации требует другое напряжение, сначала проверьте его совместимость — не ориентируйтесь только на внешний вид платы.': '> **Питание этой сборки:** RS-485, RTC и AT24C32 используют **3.3 V**. **ADS1115 питается от 5 V (`5V` / `VIN`)**. Общий провод — `GND`. Питание PZCT-DC63 выбирается по документации конкретного экземпляра.',
+          'Ключевые соединения на схеме соответствуют прошивке: `GPIO17 / TX2 → DI`, `RO → GPIO16 / RX2`, `GPIO4 / D4 → DE + /RE`, `GPIO21 / SDA → SDA`, `GPIO22 / SCL → SCL`; питание модулей — от `3V3`, общий провод — `GND`. Линия `A/B` идёт к ANENJI и при необходимости используется совместно с PZEM‑016.': 'Ключевые соединения на схеме соответствуют прошивке: `GPIO17 / TX2 → DI`, `RO → GPIO16 / RX2`, `GPIO4 / D4 → DE + /RE`, `GPIO21 / SDA → SDA`, `GPIO22 / SCL → SCL`. RS-485/RTC/AT24C32 питаются от `3V3`; **ADS1115 — от `5V/VIN`**, а его SDA/SCL согласуются с 3.3-V логикой ESP32. Общий провод — `GND`. Линия `A/B` идёт к ANENJI и при необходимости используется совместно с PZEM‑016.',
+          '| SDA | **GPIO21** | `SDA` / `D21` / `IO21` / `21` | `SDA` RTC / AT24C32 / ADS1115 |': '| SDA | **GPIO21** | `SDA` / `D21` / `IO21` / `21` | RTC / AT24C32 напрямую; ADS1115 через I²C level shifter |',
+          '| SCL | **GPIO22** | `SCL` / `D22` / `IO22` / `22` | `SCL` RTC / AT24C32 / ADS1115 |': '| SCL | **GPIO22** | `SCL` / `D22` / `IO22` / `22` | RTC / AT24C32 напрямую; ADS1115 через I²C level shifter |',
+          '| Питание | — | **`3V3` / `3.3V`** | `VCC/VDD` модулей |': '| Питание 3.3 V | — | **`3V3` / `3.3V`** | RTC / AT24C32 / LV level shifter |\n| Питание 5 V | — | **`5V` / `VIN`** | ADS1115 VDD / HV level shifter |',
+          '    ESP <-- GPIO21 SDA / GPIO22 SCL --> ADC': '    ESP <-- GPIO21 SDA / GPIO22 SCL --> SH[I2C level shifter]\n    SH <-- 5V-side SDA / SCL --> ADC',
+          '    ESP -- 3V3 + GND --> ADC': '    ESP -- 5V / VIN + GND --> ADC',
+          'В используемой сборке ADS1115 и PZCT-DC63 питаются от **3.3 V (`3V3`)**. Схема подключения, варианты маркировки GPIO на плате и порядок калибровки: **[docs/hall-current-ads1115.md](docs/hall-current-ads1115.md)**.': '**ADS1115 в используемой сборке питается от 5 V (`5V` / `VIN`)**. Поскольку ESP32 использует 3.3-V логику, линии SDA/SCL подключаются через двунаправленный I²C level shifter либо другим способом, который гарантирует отсутствие 5-V pull-up на GPIO ESP32. Питание PZCT-DC63 выбирается по документации конкретного экземпляра. Схема подключения и порядок калибровки: **[docs/hall-current-ads1115.md](docs/hall-current-ads1115.md)**.'
+          }
+          for old,new in replacements.items():
+              if old not in s:
+                  raise SystemExit('README fragment not found: '+old[:80])
+              s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+          PY
+
+      - name: Commit README correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md
+          git commit -m 'Correct ADS1115 5V wiring documentation'
+          git push origin HEAD:main
