@@ -83,3 +83,5 @@ jobs:
               --title 'ANENJI ESP32 v0.15.11' \
               --notes 'Persistent event archive: live overview remains uncluttered; evicted events are archived in LittleFS with 30-day / 64 KB retention, batching, rotation, repeat aggregation, Service-only archive controls and CSV export. Built with Minimal SPIFFS partition scheme.'
           fi
+
+# Retry after aligning permanent workflow files with v0.15.10 for tag creation.
