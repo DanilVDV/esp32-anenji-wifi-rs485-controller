@@ -49,6 +49,7 @@
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
 #include <Wire.h>
+#include <LittleFS.h>
 #include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -178,12 +179,47 @@ struct InverterEvent {
   char message[88];
 };
 
-const uint8_t INVERTER_EVENT_CAPACITY = 48;
+const uint8_t INVERTER_EVENT_CAPACITY = 64;
 InverterEvent inverterEvents[INVERTER_EVENT_CAPACITY] = {};
 uint8_t inverterEventHead = 0;
 uint8_t inverterEventCount = 0;
 uint32_t inverterEventNextId = 1;
 portMUX_TYPE inverterEventMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Persistent archive: only events evicted from the live RAM ring are queued here.
+// The Web overview stays read-only/uncluttered; archive controls live in Service.
+struct EventArchiveRecord {
+  uint32_t id;
+  uint32_t firstUptimeSec;
+  uint32_t lastUptimeSec;
+  char firstTimestamp[20];
+  char lastTimestamp[20];
+  uint16_t repeatCount;
+  uint8_t type;
+  uint8_t bit;
+  uint8_t code;
+  uint8_t active;
+  char severity[10];
+  char message[88];
+  uint16_t crc;
+};
+
+const char* EVENT_ARCHIVE_PATH = "/event_archive.bin";
+const char* EVENT_ARCHIVE_TMP_PATH = "/event_archive.tmp";
+const size_t EVENT_ARCHIVE_MAX_BYTES = 64U * 1024U;
+const size_t EVENT_ARCHIVE_TARGET_BYTES = 48U * 1024U;
+const uint16_t EVENT_ARCHIVE_RETENTION_DAYS = 30;
+const uint8_t EVENT_ARCHIVE_PENDING_CAPACITY = 16;
+const uint8_t EVENT_ARCHIVE_BATCH = 8;
+const uint32_t EVENT_ARCHIVE_FLUSH_MS = 60000UL;
+const uint32_t EVENT_ARCHIVE_PRUNE_MS = 6UL * 60UL * 60UL * 1000UL;
+EventArchiveRecord eventArchivePending[EVENT_ARCHIVE_PENDING_CAPACITY] = {};
+uint8_t eventArchivePendingCount = 0;
+portMUX_TYPE eventArchiveMux = portMUX_INITIALIZER_UNLOCKED;
+bool eventArchiveFsReady = false;
+uint32_t eventArchiveLastFlushMs = 0;
+uint32_t eventArchiveLastPruneMs = 0;
+uint32_t eventArchiveDropped = 0;
 
 static const char* const INVERTER_FAULTS[] = {
   "Inverter module over temperature", "DCDC module over temperature", "Battery over voltage",
@@ -315,6 +351,12 @@ void batteryStatsSave(bool force=false);
 bool adminAuthorized();
 bool haveReg(uint16_t reg);
 void handleEvents();
+void eventArchiveBegin();
+void eventArchiveQueue(const InverterEvent& e);
+void serviceEventArchive();
+void handleEventArchive();
+void handleEventArchiveClear();
+void handleEventArchiveCsv();
 bool i2cProbe(uint8_t addr);
 void serviceHallCurrent();
 void handleHallGet();
@@ -514,8 +556,8 @@ HardwareSerial RS485(2);
 WebServer web(80);
 
 
-const char* FW_VERSION = "0.15.10";
-const char* FW_VERSION_PREVIOUS = "0.15.9";
+const char* FW_VERSION = "0.15.11";
+const char* FW_VERSION_PREVIOUS = "0.15.10";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -1207,11 +1249,18 @@ void appendInverterEvent(uint8_t type, uint8_t bit, uint8_t code, bool active,
   e.type = type; e.bit = bit; e.code = code; e.active = active;
   snprintf(e.severity, sizeof(e.severity), "%s", severity ? severity : "INFO");
   snprintf(e.message, sizeof(e.message), "%s", message ? message : "");
+  InverterEvent evicted = {};
+  bool haveEvicted = false;
   portENTER_CRITICAL(&inverterEventMux);
+  if (inverterEventCount >= INVERTER_EVENT_CAPACITY) {
+    evicted = inverterEvents[inverterEventHead];
+    haveEvicted = true;
+  }
   inverterEvents[inverterEventHead] = e;
   inverterEventHead = (uint8_t)((inverterEventHead + 1) % INVERTER_EVENT_CAPACITY);
   if (inverterEventCount < INVERTER_EVENT_CAPACITY) inverterEventCount++;
   portEXIT_CRITICAL(&inverterEventMux);
+  if (haveEvicted) eventArchiveQueue(evicted);
 }
 
 void processInverterMasks(uint32_t faultMask, uint32_t warningMask) {
@@ -2706,6 +2755,172 @@ void appendMaskNamesJson(String& j, uint32_t mask, const char* const* names, uin
   j+=']';
 }
 
+// ---------------- persistent inverter event archive ----------------
+uint16_t eventArchiveCrc(const uint8_t* data, size_t len) {
+  uint16_t crc=0xFFFF;
+  while(len--){ crc^=*data++; for(uint8_t i=0;i<8;i++) crc=(crc&1)?(uint16_t)((crc>>1)^0xA001):(uint16_t)(crc>>1); }
+  return crc;
+}
+
+bool eventArchiveValid(const EventArchiveRecord& r) {
+  return r.repeatCount>0 && r.crc==eventArchiveCrc((const uint8_t*)&r,sizeof(r)-sizeof(r.crc));
+}
+
+int32_t eventArchiveCivilDay(int y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + (int32_t)doe;
+}
+
+bool eventArchiveTimestampDay(const char* ts, int32_t& day) {
+  if(!ts || strlen(ts)<10 || ts[4]!='-' || ts[7]!='-') return false;
+  int y=(ts[0]-'0')*1000+(ts[1]-'0')*100+(ts[2]-'0')*10+(ts[3]-'0');
+  int m=(ts[5]-'0')*10+(ts[6]-'0');
+  int d=(ts[8]-'0')*10+(ts[9]-'0');
+  if(y<2024 || m<1 || m>12 || d<1 || d>31) return false;
+  day=eventArchiveCivilDay(y,(unsigned)m,(unsigned)d); return true;
+}
+
+bool eventArchiveSame(const EventArchiveRecord& a, const InverterEvent& e) {
+  return a.type==e.type && a.bit==e.bit && a.code==e.code && a.active==(uint8_t)(e.active?1:0) &&
+         strcmp(a.severity,e.severity)==0 && strcmp(a.message,e.message)==0;
+}
+
+void eventArchiveQueue(const InverterEvent& e) {
+  portENTER_CRITICAL(&eventArchiveMux);
+  if(eventArchivePendingCount){
+    EventArchiveRecord& last=eventArchivePending[eventArchivePendingCount-1];
+    if(eventArchiveSame(last,e)){
+      if(last.repeatCount<65535) last.repeatCount++;
+      last.lastUptimeSec=e.uptimeSec;
+      snprintf(last.lastTimestamp,sizeof(last.lastTimestamp),"%s",e.timestamp);
+      last.crc=eventArchiveCrc((const uint8_t*)&last,sizeof(last)-sizeof(last.crc));
+      portEXIT_CRITICAL(&eventArchiveMux); return;
+    }
+  }
+  if(eventArchivePendingCount>=EVENT_ARCHIVE_PENDING_CAPACITY){ eventArchiveDropped++; portEXIT_CRITICAL(&eventArchiveMux); return; }
+  EventArchiveRecord& r=eventArchivePending[eventArchivePendingCount++]; r={};
+  r.id=e.id; r.firstUptimeSec=e.uptimeSec; r.lastUptimeSec=e.uptimeSec; r.repeatCount=1;
+  r.type=e.type; r.bit=e.bit; r.code=e.code; r.active=e.active?1:0;
+  snprintf(r.firstTimestamp,sizeof(r.firstTimestamp),"%s",e.timestamp);
+  snprintf(r.lastTimestamp,sizeof(r.lastTimestamp),"%s",e.timestamp);
+  snprintf(r.severity,sizeof(r.severity),"%s",e.severity);
+  snprintf(r.message,sizeof(r.message),"%s",e.message);
+  r.crc=eventArchiveCrc((const uint8_t*)&r,sizeof(r)-sizeof(r.crc));
+  portEXIT_CRITICAL(&eventArchiveMux);
+}
+
+bool eventArchiveCurrentDay(int32_t& day) {
+  RtcDateTime dt={}; if(!clockNow(dt)) return false;
+  day=eventArchiveCivilDay(dt.year,dt.month,dt.day); return true;
+}
+
+void eventArchiveCompact(bool ageCheck) {
+  if(!eventArchiveFsReady || !LittleFS.exists(EVENT_ARCHIVE_PATH)) return;
+  File in=LittleFS.open(EVENT_ARCHIVE_PATH,FILE_READ); if(!in) return;
+  const size_t recSize=sizeof(EventArchiveRecord); size_t total=in.size()/recSize;
+  if(!total){ in.close(); LittleFS.remove(EVENT_ARCHIVE_PATH); return; }
+  size_t maxKeep=EVENT_ARCHIVE_TARGET_BYTES/recSize;
+  size_t start=(total>maxKeep)?(total-maxKeep):0;
+  int32_t nowDay=0; bool haveDay=ageCheck && eventArchiveCurrentDay(nowDay);
+  bool needsRewrite=(in.size()>EVENT_ARCHIVE_MAX_BYTES);
+  if(haveDay && !needsRewrite){
+    EventArchiveRecord r={};
+    for(size_t i=0;i<total;i++){
+      if(in.read((uint8_t*)&r,recSize)!=recSize) break;
+      int32_t d=0; if(eventArchiveValid(r) && eventArchiveTimestampDay(r.lastTimestamp,d) && nowDay-d>(int32_t)EVENT_ARCHIVE_RETENTION_DAYS){ needsRewrite=true; break; }
+    }
+  }
+  if(!needsRewrite){ in.close(); return; }
+  in.seek(start*recSize,SeekSet);
+  LittleFS.remove(EVENT_ARCHIVE_TMP_PATH);
+  File out=LittleFS.open(EVENT_ARCHIVE_TMP_PATH,FILE_WRITE); if(!out){ in.close(); return; }
+  EventArchiveRecord r={};
+  while(in.read((uint8_t*)&r,recSize)==recSize){
+    if(!eventArchiveValid(r)) continue;
+    if(haveDay){ int32_t d=0; if(eventArchiveTimestampDay(r.lastTimestamp,d) && nowDay-d>(int32_t)EVENT_ARCHIVE_RETENTION_DAYS) continue; }
+    out.write((const uint8_t*)&r,recSize);
+  }
+  out.close(); in.close();
+  LittleFS.remove(EVENT_ARCHIVE_PATH); LittleFS.rename(EVENT_ARCHIVE_TMP_PATH,EVENT_ARCHIVE_PATH);
+}
+
+void eventArchiveBegin() {
+  eventArchiveFsReady=LittleFS.begin(true);
+  if(!eventArchiveFsReady){ Serial.println(F("[EVENT ARCHIVE] LittleFS mount failed")); return; }
+  if(LittleFS.exists(EVENT_ARCHIVE_PATH)){
+    File f=LittleFS.open(EVENT_ARCHIVE_PATH,FILE_READ);
+    if(f && (f.size()%sizeof(EventArchiveRecord))!=0){ f.close(); LittleFS.remove(EVENT_ARCHIVE_PATH); }
+    else if(f) f.close();
+  }
+  eventArchiveCompact(true);
+}
+
+void serviceEventArchive() {
+  if(!eventArchiveFsReady) return;
+  uint32_t now=millis(); uint8_t count=0;
+  portENTER_CRITICAL(&eventArchiveMux); count=eventArchivePendingCount; portEXIT_CRITICAL(&eventArchiveMux);
+  if(count && (count>=EVENT_ARCHIVE_BATCH || !eventArchiveLastFlushMs || (uint32_t)(now-eventArchiveLastFlushMs)>=EVENT_ARCHIVE_FLUSH_MS)){
+    EventArchiveRecord batch[EVENT_ARCHIVE_PENDING_CAPACITY]; uint8_t n=0;
+    portENTER_CRITICAL(&eventArchiveMux);
+    n=eventArchivePendingCount; if(n>EVENT_ARCHIVE_PENDING_CAPACITY)n=EVENT_ARCHIVE_PENDING_CAPACITY;
+    for(uint8_t i=0;i<n;i++) batch[i]=eventArchivePending[i]; eventArchivePendingCount=0;
+    portEXIT_CRITICAL(&eventArchiveMux);
+    File f=LittleFS.open(EVENT_ARCHIVE_PATH,FILE_APPEND);
+    if(f){ for(uint8_t i=0;i<n;i++) f.write((const uint8_t*)&batch[i],sizeof(EventArchiveRecord)); f.close(); eventArchiveLastFlushMs=now; }
+    else { eventArchiveDropped+=n; }
+    eventArchiveCompact(false);
+  }
+  if(!eventArchiveLastPruneMs || (uint32_t)(now-eventArchiveLastPruneMs)>=EVENT_ARCHIVE_PRUNE_MS){ eventArchiveLastPruneMs=now; eventArchiveCompact(true); }
+}
+
+const char* eventArchiveTypeName(uint8_t type){ return type==1?"fault":(type==2?"warning":(type==3?"mode":"event")); }
+
+void handleEventArchive() {
+  String j; j.reserve(22000); size_t bytes=0,total=0; uint8_t pending=0;
+  portENTER_CRITICAL(&eventArchiveMux); pending=eventArchivePendingCount; portEXIT_CRITICAL(&eventArchiveMux);
+  if(eventArchiveFsReady && LittleFS.exists(EVENT_ARCHIVE_PATH)){ File f=LittleFS.open(EVENT_ARCHIVE_PATH,FILE_READ); if(f){ bytes=f.size(); total=bytes/sizeof(EventArchiveRecord); f.close(); } }
+  j=F("{\"ok\":true,\"fs_ready\":"); j+=eventArchiveFsReady?F("true"):F("false");
+  j+=F(",\"count\":"); j+=(uint32_t)total; j+=F(",\"bytes\":"); j+=(uint32_t)bytes;
+  j+=F(",\"max_bytes\":"); j+=(uint32_t)EVENT_ARCHIVE_MAX_BYTES; j+=F(",\"pending\":"); j+=pending;
+  j+=F(",\"dropped\":"); j+=eventArchiveDropped; j+=F(",\"retention_days\":"); j+=EVENT_ARCHIVE_RETENTION_DAYS;
+  j+=F(",\"events\":[");
+  if(eventArchiveFsReady && total){
+    File f=LittleFS.open(EVENT_ARCHIVE_PATH,FILE_READ); if(f){ size_t shown=min((size_t)100,total); bool first=true;
+      for(size_t n=0;n<shown;n++){ size_t idx=total-1-n; EventArchiveRecord r={}; if(!f.seek(idx*sizeof(r),SeekSet) || f.read((uint8_t*)&r,sizeof(r))!=sizeof(r) || !eventArchiveValid(r)) continue;
+        if(!first)j+=','; first=false; j+=F("{\"id\":");j+=r.id; j+=F(",\"first_timestamp\":"); if(r.firstTimestamp[0]){j+='\"';j+=r.firstTimestamp;j+='\"';}else j+=F("null");
+        j+=F(",\"last_timestamp\":"); if(r.lastTimestamp[0]){j+='\"';j+=r.lastTimestamp;j+='\"';}else j+=F("null");
+        j+=F(",\"first_uptime_s\":");j+=r.firstUptimeSec;j+=F(",\"last_uptime_s\":");j+=r.lastUptimeSec;j+=F(",\"repeats\":");j+=r.repeatCount;
+        j+=F(",\"type\":\"");j+=eventArchiveTypeName(r.type);j+=F("\",\"active\":");j+=r.active?F("true"):F("false");j+=F(",\"severity\":\"");j+=jsonEscape(String(r.severity));
+        j+=F("\",\"message\":\"");j+=jsonEscape(String(r.message));j+=F("\"}");
+      } f.close();
+    }
+  }
+  j+=F("]}"); sendJson(200,j);
+}
+
+String eventArchiveCsvField(const char* s){ String v=s?s:""; v.replace("\"","\"\""); return String("\"")+v+"\""; }
+void handleEventArchiveCsv() {
+  if(!eventArchiveFsReady){ sendJson(503,F("{\"ok\":false,\"error\":\"Event archive filesystem unavailable\"}")); return; }
+  web.sendHeader("Content-Disposition","attachment; filename=anenji-event-archive.csv"); web.setContentLength(CONTENT_LENGTH_UNKNOWN); web.send(200,"text/csv; charset=utf-8","");
+  web.sendContent("first_timestamp,last_timestamp,repeats,type,state,severity,message,first_uptime_s,last_uptime_s\r\n");
+  if(LittleFS.exists(EVENT_ARCHIVE_PATH)){ File f=LittleFS.open(EVENT_ARCHIVE_PATH,FILE_READ); EventArchiveRecord r={};
+    if(f){ while(f.read((uint8_t*)&r,sizeof(r))==sizeof(r)){ if(!eventArchiveValid(r))continue; String line;
+      line.reserve(240); line+=eventArchiveCsvField(r.firstTimestamp);line+=',';line+=eventArchiveCsvField(r.lastTimestamp);line+=',';line+=r.repeatCount;line+=',';line+=eventArchiveTypeName(r.type);line+=',';line+=(r.active?"raised":"cleared");line+=',';line+=eventArchiveCsvField(r.severity);line+=',';line+=eventArchiveCsvField(r.message);line+=',';line+=r.firstUptimeSec;line+=',';line+=r.lastUptimeSec;line+="\r\n"; web.sendContent(line); } f.close(); }
+  }
+  web.sendContent("");
+}
+
+void handleEventArchiveClear() {
+  if(!adminAuthorized()){ sendJson(401,F("{\"ok\":false,\"error\":\"Admin authorization required\"}")); return; }
+  if(eventArchiveFsReady){ LittleFS.remove(EVENT_ARCHIVE_PATH); LittleFS.remove(EVENT_ARCHIVE_TMP_PATH); }
+  portENTER_CRITICAL(&eventArchiveMux); eventArchivePendingCount=0; portEXIT_CRITICAL(&eventArchiveMux);
+  eventArchiveDropped=0; sendJson(200,F("{\"ok\":true}"));
+}
+
 void handleEvents() {
   String j; j.reserve(6000); j=F("{\"ok\":true,\"events\":[");
   uint8_t count,head;
@@ -3926,6 +4141,17 @@ pre{white-space:pre-wrap;background:#111827;border-radius:9px;padding:10px;max-h
 <div class="small" style="margin-top:8px">Тариф T1: 07:00–23:00. T2: 23:00–07:00. После ввода текущих показаний электросчётчика прошивка распределяет прирост энергии PZEM по тарифам и хранит T1/T2 в AT24C32. PZEM-016: 9600 8N1, FC04, регистры 0x0000…0x0009.</div>
 </div>
 
+<div class="card"><h2>Архив событий</h2>
+<div class="small">Старые события автоматически переносятся сюда из оперативного журнала. Главный экран остаётся без кнопок управления архивом. Хранение ограничено 30 днями и 64 КБ, старые записи ротируются автоматически; одинаковые подряд события объединяются со счётчиком повторов.</div>
+<div class="grid" style="margin-top:10px">
+ <div class="metric"><small>События в архиве</small><b id="eventArchiveCount">—</b></div>
+ <div class="metric"><small>Размер архива</small><b id="eventArchiveSize">—</b></div>
+ <div class="metric"><small>В очереди на запись</small><b id="eventArchivePending">—</b></div>
+</div>
+<div class="toolbar" style="margin-top:10px"><button onclick="eventArchiveLoad()">Обновить архив</button><button onclick="eventArchiveDownload()">Скачать CSV</button><button class="danger" onclick="eventArchiveClear()">Очистить архив</button><span id="eventArchiveMsg" class="small"></span></div>
+<div id="eventArchiveList" style="margin-top:10px;max-height:420px;overflow:auto"><div class="small">Архив ещё не загружен.</div></div>
+</div>
+
 <div class="card"><h2>PZCT-DC63 · DC ток / ADS1115</h2>
 <div class="grid">
  <div class="metric"><small>Ток Холла</small><b id="hallA">— A</b></div>
@@ -4012,6 +4238,7 @@ const UI_TEXT=[
 UI_TEXT.push(
  ['Обзор','Overview'],['Статистика аккумулятора','Battery statistics'],['Сервис','Service'],['Планировщик','Scheduler'],
  ['Состояние / аварии','Status / alarms'],['Аварии','Faults'],['Предупреждения','Warnings'],['События','Events'],
+ ['Архив событий','Event archive'],['События в архиве','Archived events'],['Размер архива','Archive size'],['В очереди на запись','Pending writes'],['Обновить архив','Refresh archive'],['Скачать CSV','Download CSV'],['Очистить архив','Clear archive'],['Архив ещё не загружен.','Archive has not been loaded yet.'],
  ['Нет активных аварий','No active faults'],['Нет активных предупреждений','No active warnings'],['Нет событий','No events'],
  ['Онлайн','Online'],['Офлайн','Offline'],['Подключено','Connected'],['Не подключено','Disconnected'],['Неизвестно','Unknown'],
  ['Активно','Active'],['Неактивно','Inactive'],['Включено','Enabled'],['Выключено','Disabled'],['Готово','Ready'],
@@ -4168,6 +4395,23 @@ async function eventsLoad(force=false){
  const now=Date.now();if(!force&&now-lastEventLoadMs<9000)return;lastEventLoadMs=now;
  try{const x=await api('/api/events',{timeoutMs:2200}),ev=Array.isArray(x.events)?x.events:[];if(!$('eventLog'))return;$('eventLog').innerHTML=ev.length?ev.slice(0,24).map(e=>{const cls=e.severity==='CRITICAL'?'critical':(e.severity==='WARNING'?'warning':'');const state=e.type==='mode'?'':(e.active?'RAISED':'CLEARED');const when=e.timestamp?e.timestamp:(`uptime ${e.uptime_s}s`);return `<div class="alert-row ${cls} ${e.active?'':'clear'}"><b>${when} · ${e.severity} · ${e.type.toUpperCase()} ${state}</b><small>${e.message}</small></div>`}).join(''):'<div class="small">Событий пока нет.</div>';}catch(e){}
 }
+async function eventArchiveLoad(){
+ try{
+  const x=await api('/api/events/archive',{timeoutMs:3500}),ev=Array.isArray(x.events)?x.events:[];
+  if($('eventArchiveCount'))$('eventArchiveCount').textContent=String(x.count||0);
+  if($('eventArchiveSize'))$('eventArchiveSize').textContent=((Number(x.bytes||0)/1024).toFixed(1))+' KB / '+((Number(x.max_bytes||65536)/1024).toFixed(0))+' KB';
+  if($('eventArchivePending'))$('eventArchivePending').textContent=String(x.pending||0);
+  if($('eventArchiveMsg'))$('eventArchiveMsg').textContent=x.fs_ready?(x.dropped?((currentLang==='ru'?'Потеряно из очереди: ':'Dropped from queue: ')+x.dropped):''):(currentLang==='ru'?'LittleFS недоступен':'LittleFS unavailable');
+  if($('eventArchiveList'))$('eventArchiveList').innerHTML=ev.length?ev.map(e=>{const cls=e.severity==='CRITICAL'?'critical':(e.severity==='WARNING'?'warning':'');const state=e.type==='mode'?'':(e.active?'RAISED':'CLEARED');const first=e.first_timestamp||('uptime '+e.first_uptime_s+'s');const last=e.last_timestamp||('uptime '+e.last_uptime_s+'s');const times=e.repeats>1?`${first} → ${last} · ×${e.repeats}`:first;return `<div class="alert-row ${cls} ${e.active?'':'clear'}"><b>${times} · ${e.severity} · ${String(e.type||'').toUpperCase()} ${state}</b><small>${e.message||''}</small></div>`}).join(''):`<div class="small">${currentLang==='ru'?'Архив пока пуст.':'Archive is empty.'}</div>`;
+ }catch(e){if($('eventArchiveMsg'))$('eventArchiveMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
+}
+function eventArchiveDownload(){ window.location.href='/api/events/archive.csv'; }
+async function eventArchiveClear(){
+ const q=currentLang==='ru'?'Удалить весь архив событий? Текущий журнал на главном экране не будет очищен.':'Delete the whole event archive? The live log on the overview will not be cleared.';
+ if(!confirm(q))return;
+ try{await api('/api/events/archive/clear',{method:'POST',headers:adminHeaders(),body:'{}'});if($('eventArchiveMsg'))$('eventArchiveMsg').textContent=currentLang==='ru'?'Архив очищен':'Archive cleared';await eventArchiveLoad();}catch(e){if($('eventArchiveMsg'))$('eventArchiveMsg').innerHTML='<span class=bad>'+e.message+'</span>'}
+}
+
 let autonomyAvgW=null,autonomyLastMs=0;
 
 function formatRuntime(hours){
@@ -4590,6 +4834,7 @@ function showTab(id,remember=true){
  document.querySelectorAll('.tab-page').forEach(p=>p.classList.toggle('active',p.id==='tab-'+id));
  document.querySelectorAll('.app-tab').forEach(b=>b.classList.toggle('active',b.dataset.page===id));
  if(remember)localStorage.setItem(TAB_STORAGE_KEY,id);
+ if(id==='service')eventArchiveLoad();
  window.scrollTo({top:0,behavior:'instant'});
  if(id==='overview')schedulePzemHouseFlowLayout();
 }
@@ -4972,6 +5217,9 @@ void setupWeb() {
   web.on("/", HTTP_GET, handleRoot);
   web.on("/api/status", HTTP_GET, sendJsonStatus);
   web.on("/api/events", HTTP_GET, handleEvents);
+  web.on("/api/events/archive", HTTP_GET, handleEventArchive);
+  web.on("/api/events/archive.csv", HTTP_GET, handleEventArchiveCsv);
+  web.on("/api/events/archive/clear", HTTP_POST, handleEventArchiveClear);
   web.on("/api/refresh", HTTP_GET, handleRefresh);
   web.on("/api/raw", HTTP_GET, handleRaw);
   web.on("/api/raw/status", HTTP_GET, handleRawStatus);
@@ -5184,6 +5432,7 @@ void setup() {
   Wire.begin(RTC_SDA_PIN, RTC_SCL_PIN);
   Wire.setClock(100000);
   Wire.setTimeOut(50);  // prevent a stuck RTC/I2C bus from blocking the web loop
+  eventArchiveBegin();
   RtcDateTime bootRtc;
   rtcPresent = rtcRead(bootRtc);
   if (rtcPresent && bootRtc.valid) clockCache(bootRtc,CLOCK_RTC);
@@ -5238,6 +5487,7 @@ void loop() {
   serviceBootButton();
   serviceWifiWatchdog();
   serviceHallCurrent();
+  serviceEventArchive();
   serviceHeapWatchdog();
   serviceNtpRtcSync();
 
