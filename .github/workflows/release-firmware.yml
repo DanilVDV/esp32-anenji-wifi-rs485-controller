@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to publish, e.g. v0.15.9'
+        description: 'Existing tag to publish, e.g. v0.15.11'
         required: true
 
 permissions:
@@ -48,11 +48,11 @@ jobs:
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Compile release binaries
+      - name: Compile release binaries (Minimal SPIFFS)
         run: |
           mkdir -p build/anenji build/release
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32 \
+            --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
             --output-dir build/anenji \
             firmware/ANENJI_ESP32_Controller
           cp build/anenji/ANENJI_ESP32_Controller.ino.bin "build/release/ANENJI_ESP32_Controller-${RELEASE_TAG}.bin"
