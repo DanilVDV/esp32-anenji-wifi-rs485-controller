@@ -48,11 +48,11 @@ jobs:
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Compile ESP32 Dev Module (Minimal SPIFFS)
+      - name: Compile ESP32 Dev Module
         run: |
           mkdir -p build/anenji
           arduino-cli compile \
-            --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
+            --fqbn esp32:esp32:esp32 \
             --output-dir build/anenji \
             firmware/ANENJI_ESP32_Controller
 
