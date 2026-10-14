@@ -1,0 +1,65 @@
+name: Apply v0.15.11 event archive
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-v01511-event-archive.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Apply v0.15.11 patch
+        run: python3 tools/apply_v01511_event_archive.py
+
+      - name: Verify version and archive placement
+        run: |
+          grep -q 'const char\* FW_VERSION = "0.15.11";' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          grep -q 'EVENT_ARCHIVE_MAX_BYTES = 64U \* 1024U' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          grep -q 'id="eventArchiveList"' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          grep -q "if(id==='service')eventArchiveLoad();" firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+
+      - name: Validate embedded JavaScript
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino').read_text(encoding='utf-8')
+          m=re.search(r'R"HTML\((.*?)\)HTML"',s,re.S)
+          scripts=re.findall(r'<script>(.*?)</script>',m.group(1),re.S) if m else []
+          if not scripts: raise SystemExit('embedded JavaScript not found')
+          Path('/tmp/embedded.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/embedded.js
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile Minimal SPIFFS build
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
+            firmware/ANENJI_ESP32_Controller
+
+      - name: Commit v0.15.11
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino README.md
+          git commit -m 'Add persistent event archive v0.15.11'
+          git push origin HEAD:main
