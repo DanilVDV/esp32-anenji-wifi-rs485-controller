@@ -556,8 +556,8 @@ HardwareSerial RS485(2);
 WebServer web(80);
 
 
-const char* FW_VERSION = "0.15.11";
-const char* FW_VERSION_PREVIOUS = "0.15.10";
+const char* FW_VERSION = "0.15.12";
+const char* FW_VERSION_PREVIOUS = "0.15.11";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -2763,7 +2763,14 @@ uint16_t eventArchiveCrc(const uint8_t* data, size_t len) {
 }
 
 bool eventArchiveValid(const EventArchiveRecord& r) {
-  return r.repeatCount>0 && r.crc==eventArchiveCrc((const uint8_t*)&r,sizeof(r)-sizeof(r.crc));
+  // v0.15.11 calculated CRC while the crc field itself was still zero.
+  // Validate the same way so already-written archive records remain readable.
+  // Without clearing crc first, every persisted record fails validation.
+  if(!r.repeatCount) return false;
+  EventArchiveRecord copy=r;
+  const uint16_t stored=copy.crc;
+  copy.crc=0;
+  return stored==eventArchiveCrc((const uint8_t*)&copy,sizeof(copy)-sizeof(copy.crc));
 }
 
 int32_t eventArchiveCivilDay(int y, unsigned m, unsigned d) {
@@ -2797,6 +2804,7 @@ void eventArchiveQueue(const InverterEvent& e) {
       if(last.repeatCount<65535) last.repeatCount++;
       last.lastUptimeSec=e.uptimeSec;
       snprintf(last.lastTimestamp,sizeof(last.lastTimestamp),"%s",e.timestamp);
+      last.crc=0;
       last.crc=eventArchiveCrc((const uint8_t*)&last,sizeof(last)-sizeof(last.crc));
       portEXIT_CRITICAL(&eventArchiveMux); return;
     }
@@ -2870,9 +2878,32 @@ void serviceEventArchive() {
     for(uint8_t i=0;i<n;i++) batch[i]=eventArchivePending[i]; eventArchivePendingCount=0;
     portEXIT_CRITICAL(&eventArchiveMux);
     File f=LittleFS.open(EVENT_ARCHIVE_PATH,FILE_APPEND);
-    if(f){ for(uint8_t i=0;i<n;i++) f.write((const uint8_t*)&batch[i],sizeof(EventArchiveRecord)); f.close(); eventArchiveLastFlushMs=now; }
-    else { eventArchiveDropped+=n; }
-    eventArchiveCompact(false);
+    bool writeOk=(bool)f;
+    if(f){
+      for(uint8_t i=0;i<n;i++){
+        if(f.write((const uint8_t*)&batch[i],sizeof(EventArchiveRecord))!=sizeof(EventArchiveRecord)){ writeOk=false; break; }
+      }
+      f.close();
+    }
+    if(writeOk){
+      eventArchiveLastFlushMs=now;
+    } else {
+      // Do not silently lose evicted live events when LittleFS is temporarily unavailable.
+      // Put unwritten records back in front of any records queued meanwhile.
+      portENTER_CRITICAL(&eventArchiveMux);
+      uint8_t newer=eventArchivePendingCount;
+      uint8_t room=(uint8_t)(EVENT_ARCHIVE_PENDING_CAPACITY-newer);
+      uint8_t restore=min(n,room);
+      if(restore){
+        for(int i=(int)newer-1;i>=0;i--) eventArchivePending[i+restore]=eventArchivePending[i];
+        for(uint8_t i=0;i<restore;i++) eventArchivePending[i]=batch[i];
+        eventArchivePendingCount=(uint8_t)(newer+restore);
+      }
+      if(restore<n) eventArchiveDropped+=(uint32_t)(n-restore);
+      portEXIT_CRITICAL(&eventArchiveMux);
+      Serial.println(F("[EVENT ARCHIVE] write failed; records kept pending"));
+    }
+    if(writeOk) eventArchiveCompact(false);
   }
   if(!eventArchiveLastPruneMs || (uint32_t)(now-eventArchiveLastPruneMs)>=EVENT_ARCHIVE_PRUNE_MS){ eventArchiveLastPruneMs=now; eventArchiveCompact(true); }
 }
