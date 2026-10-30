@@ -1,0 +1,82 @@
+name: Publish v0.15.12 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v01512-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout clean v0.15.12 source
+        uses: actions/checkout@v5
+        with:
+          ref: 1fe547590fadcc5bd79b04cc74496e1519c1dc55
+          fetch-depth: 0
+
+      - name: Verify firmware version
+        run: |
+          grep -q 'const char\* FW_VERSION = "0.15.12";' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+
+      - name: Validate embedded JavaScript
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino').read_text(encoding='utf-8')
+          m=re.search(r'R"HTML\((.*?)\)HTML"',s,re.S)
+          if not m: raise SystemExit('Embedded HTML block not found')
+          scripts=re.findall(r'<script>(.*?)</script>',m.group(1),re.S)
+          if not scripts: raise SystemExit('Embedded JavaScript not found')
+          Path('/tmp/embedded.js').write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/embedded.js
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Arduino core
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile v0.15.12
+        run: |
+          mkdir -p build/anenji build/release
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32:PartitionScheme=min_spiffs \
+            --output-dir build/anenji \
+            firmware/ANENJI_ESP32_Controller
+          cp build/anenji/ANENJI_ESP32_Controller.ino.bin build/release/ANENJI_ESP32_Controller-v0.15.12.bin
+          cp build/anenji/ANENJI_ESP32_Controller.ino.bootloader.bin build/release/ANENJI_ESP32_Controller-v0.15.12-bootloader.bin
+          cp build/anenji/ANENJI_ESP32_Controller.ino.partitions.bin build/release/ANENJI_ESP32_Controller-v0.15.12-partitions.bin
+          sha256sum build/release/*.bin > build/release/SHA256SUMS-v0.15.12.txt
+
+      - name: Create tag
+        run: |
+          if git ls-remote --exit-code --tags origin refs/tags/v0.15.12 >/dev/null 2>&1; then
+            echo "Tag v0.15.12 already exists"
+          else
+            git tag v0.15.12 1fe547590fadcc5bd79b04cc74496e1519c1dc55
+            git push origin refs/tags/v0.15.12
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.15.12 >/dev/null 2>&1; then
+            gh release upload v0.15.12 build/release/* --clobber
+          else
+            gh release create v0.15.12 build/release/* \
+              --target 1fe547590fadcc5bd79b04cc74496e1519c1dc55 \
+              --title "ANENJI ESP32 v0.15.12" \
+              --notes "Fix event archive persistence: archived records from v0.15.11 are validated correctly again, existing LittleFS archive data remains readable, and temporary archive write failures no longer silently drop queued events."
+          fi
