@@ -186,7 +186,7 @@ uint8_t inverterEventCount = 0;
 uint32_t inverterEventNextId = 1;
 portMUX_TYPE inverterEventMux = portMUX_INITIALIZER_UNLOCKED;
 
-// Persistent archive: only events evicted from the live RAM ring are queued here.
+// Persistent archive: every new event is queued here; the live RAM ring remains a recent-events view.
 // The Web overview stays read-only/uncluttered; archive controls live in Service.
 struct EventArchiveRecord {
   uint32_t id;
@@ -556,8 +556,8 @@ HardwareSerial RS485(2);
 WebServer web(80);
 
 
-const char* FW_VERSION = "0.15.12";
-const char* FW_VERSION_PREVIOUS = "0.15.11";
+const char* FW_VERSION = "0.15.13";
+const char* FW_VERSION_PREVIOUS = "0.15.12";
 
 // Web OTA state. During flash writes the RTU worker and scheduler are paused.
 volatile bool otaInProgress=false;
@@ -1249,18 +1249,15 @@ void appendInverterEvent(uint8_t type, uint8_t bit, uint8_t code, bool active,
   e.type = type; e.bit = bit; e.code = code; e.active = active;
   snprintf(e.severity, sizeof(e.severity), "%s", severity ? severity : "INFO");
   snprintf(e.message, sizeof(e.message), "%s", message ? message : "");
-  InverterEvent evicted = {};
-  bool haveEvicted = false;
+  // Persist every event independently of the live RAM ring.
+  // The Overview still shows only the latest INVERTER_EVENT_CAPACITY events,
+  // while the Service archive becomes a continuous history across reboots.
   portENTER_CRITICAL(&inverterEventMux);
-  if (inverterEventCount >= INVERTER_EVENT_CAPACITY) {
-    evicted = inverterEvents[inverterEventHead];
-    haveEvicted = true;
-  }
   inverterEvents[inverterEventHead] = e;
   inverterEventHead = (uint8_t)((inverterEventHead + 1) % INVERTER_EVENT_CAPACITY);
   if (inverterEventCount < INVERTER_EVENT_CAPACITY) inverterEventCount++;
   portEXIT_CRITICAL(&inverterEventMux);
-  if (haveEvicted) eventArchiveQueue(evicted);
+  eventArchiveQueue(e);
 }
 
 void processInverterMasks(uint32_t faultMask, uint32_t warningMask) {
