@@ -1,0 +1,92 @@
+name: Refresh README media
+
+on:
+  push:
+    branches:
+      - chatgpt/anenji-alerts-v0.15.0
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Install media tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick ffmpeg
+
+      - name: Create readable current screenshots
+        run: |
+          set -euxo pipefail
+          for name in dashboard battery-stats rtc-scheduler network-modbus service-pzem-ota; do
+            convert "docs/media/${name}.webp" -filter Lanczos -resize 200% -unsharp 0x0.8+0.8+0.02 "docs/media/${name}-current.png"
+          done
+
+      - name: Create current demo video
+        run: |
+          set -euxo pipefail
+          : > /tmp/ui-demo.txt
+          for name in dashboard battery-stats rtc-scheduler network-modbus service-pzem-ota; do
+            printf "file '%s/docs/media/%s-current.png'\nduration 5\n" "$GITHUB_WORKSPACE" "$name" >> /tmp/ui-demo.txt
+          done
+          printf "file '%s/docs/media/service-pzem-ota-current.png'\n" "$GITHUB_WORKSPACE" >> /tmp/ui-demo.txt
+          ffmpeg -y -f concat -safe 0 -i /tmp/ui-demo.txt -vf "scale=840:-2:flags=lanczos,format=yuv420p" -r 24 -c:v libx264 -preset medium -crf 25 -movflags +faststart docs/media/demo-current.mp4
+
+      - name: Replace README media section
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('README.md')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace('Версия исходной прошивки: **0.14.31**.', 'Текущая версия прошивки: **0.15.6**.')
+          start=s.index('## Демонстрация Web UI')
+          end=s.index('\n## Возможности', start)
+          block='''## Демонстрация Web UI
+
+Актуальные кадры Web UI **v0.15.6**. Скриншоты показаны крупно; по клику открывается оригинал.
+
+<p align="center"><a href="docs/media/demo-current.mp4">▶ Открыть актуальное видео интерфейса</a></p>
+
+### Обзор / энергетическая схема
+<p align="center"><a href="docs/media/dashboard-current.png"><img src="docs/media/dashboard-current.png" alt="Обзор и энергетическая схема" width="840"></a></p>
+
+### Статистика аккумулятора
+<p align="center"><a href="docs/media/battery-stats-current.png"><img src="docs/media/battery-stats-current.png" alt="Статистика аккумулятора" width="840"></a></p>
+
+### Время / Планировщик
+<p align="center"><a href="docs/media/rtc-scheduler-current.png"><img src="docs/media/rtc-scheduler-current.png" alt="Время и планировщик" width="840"></a></p>
+
+### Wi-Fi / сеть ESP32 и Modbus / RS-485
+<p align="center"><a href="docs/media/network-modbus-current.png"><img src="docs/media/network-modbus-current.png" alt="Сеть и Modbus" width="840"></a></p>
+
+### Сервис / PZEM-016 / OTA
+<p align="center"><a href="docs/media/service-pzem-ota-current.png"><img src="docs/media/service-pzem-ota-current.png" alt="Сервис PZEM OTA" width="840"></a></p>
+
+> Старые `demo.gif` и `demo.mp4` README больше не использует.
+'''
+          p.write_text(s[:start]+block+s[end:], encoding='utf-8')
+          PY
+
+      - name: Validate and push
+        run: |
+          set -euxo pipefail
+          for f in docs/media/*-current.png docs/media/demo-current.mp4; do test -s "$f"; done
+          grep -q 'dashboard-current.png' README.md
+          grep -q 'demo-current.mp4' README.md
+          if grep -q 'docs/media/demo.gif' README.md; then exit 1; fi
+          if grep -q 'docs/media/demo.mp4' README.md; then exit 1; fi
+          git config user.name "ChatGPT"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/media/*-current.png docs/media/demo-current.mp4
+          git diff --cached --check
+          git commit -m "Refresh README screenshots and demo video"
+          git push origin HEAD:main

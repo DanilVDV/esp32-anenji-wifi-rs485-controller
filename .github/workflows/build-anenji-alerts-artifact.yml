@@ -1,0 +1,82 @@
+name: Build ANENJI alerts artifact
+
+on:
+  push:
+    branches:
+      - chatgpt/anenji-alerts-v0.15.0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make known UI anchors tolerant
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/apply_anenji_alerts_v0_15_0.py')
+          s=p.read_text(encoding='utf-8')
+          old="""    if old not in s:\n        raise SystemExit(f'Anchor not found: {label}')\n"""
+          new="""    if old not in s:\n        if label == 'alert html':\n            needle = '<div class=\"card\"><h2>Полная телеметрия</h2><div id=\"tele\" class=\"grid\"></div><div class=\"toolbar\" style=\"margin-top:12px\"><button onclick=\"statusLoad(true)\">Обновить сейчас</button><span id=\"age\" class=\"small\"></span></div></div>\\n'\n            if needle in s:\n                insert = new\n                prefix = '</div></div>\\n'\n                if insert.startswith(prefix): insert = insert[len(prefix):]\n                s = s.replace(needle, insert, 1)\n                return\n        if label == 'alert javascript':\n            needle = 'let autonomyAvgW=null,autonomyLastMs=0;\\n'\n            if needle in s:\n                insert = new\n                prefix = '];\\n'\n                if insert.startswith(prefix): insert = insert[len(prefix):]\n                s = s.replace(needle, insert, 1)\n                return\n        raise SystemExit(f'Anchor not found: {label}')\n"""
+          if old not in s:
+              raise SystemExit('repl helper anchor missing')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+
+      - name: Apply v0.15.0 patch
+        run: python3 tools/apply_anenji_alerts_v0_15_0.py . || true
+
+      - name: Finalize required INO changes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino')
+          s=p.read_text(encoding='utf-8')
+          telemetry_card='<div class="card"><h2>Полная телеметрия</h2><div id="tele" class="grid"></div><div class="toolbar" style="margin-top:12px"><button onclick="statusLoad(true)">Обновить сейчас</button><span id="age" class="small"></span></div></div>\n'
+          alert_card='''<div class="card"><h2>Состояние / аварии</h2>\n <div class="alert-summary"><div class="alert-box"><small>Режим</small><b id="alertMode">—</b></div><div class="alert-box critical"><small>Активные аварии</small><b id="alertFaultCount">0</b></div><div class="alert-box warning"><small>Активные предупреждения</small><b id="alertWarningCount">0</b></div></div>\n <div id="activeAlerts" class="alert-list"><div class="small">Нет активных аварий.</div></div>\n <details style="margin-top:10px"><summary>Журнал событий</summary><div id="eventLog" class="alert-list" style="margin-top:8px"><div class="small">—</div></div></details>\n</div>\n'''
+          if 'id="alertMode"' not in s:
+              if telemetry_card not in s: raise SystemExit('telemetry card anchor missing')
+              s=s.replace(telemetry_card,alert_card+telemetry_card,1)
+          if 'let lastEventLoadMs=0;' not in s:
+              needle='let autonomyAvgW=null,autonomyLastMs=0;\n'
+              if needle not in s: raise SystemExit('autonomy JS anchor missing')
+              block='''let lastEventLoadMs=0;\nfunction renderAlerts(x){\n const a=x.alerts||{},faults=Array.isArray(a.faults)?a.faults:[],warnings=Array.isArray(a.warnings)?a.warnings:[];\n if($('alertMode'))$('alertMode').textContent=a.operation_mode_text||'—';\n if($('alertFaultCount'))$('alertFaultCount').textContent=String(faults.length);\n if($('alertWarningCount'))$('alertWarningCount').textContent=String(warnings.length);\n if($('activeAlerts')){const rows=[];faults.forEach(v=>rows.push(`<div class="alert-row critical"><b>FAULT · bit ${v.bit}</b><small>${v.text}</small></div>`));warnings.forEach(v=>rows.push(`<div class="alert-row warning"><b>WARNING · bit ${v.bit}</b><small>${v.text}</small></div>`));$('activeAlerts').innerHTML=rows.length?rows.join(''):'<div class="small ok">Активных аварий и предупреждений нет.</div>';}\n}\nasync function eventsLoad(force=false){\n const now=Date.now();if(!force&&now-lastEventLoadMs<9000)return;lastEventLoadMs=now;\n try{const x=await api('/api/events',{timeoutMs:2200}),ev=Array.isArray(x.events)?x.events:[];if(!$('eventLog'))return;$('eventLog').innerHTML=ev.length?ev.slice(0,24).map(e=>{const cls=e.severity==='CRITICAL'?'critical':(e.severity==='WARNING'?'warning':'');const state=e.type==='mode'?'':(e.active?'RAISED':'CLEARED');return `<div class="alert-row ${cls} ${e.active?'':'clear'}"><b>${e.severity} · ${e.type.toUpperCase()} ${state}</b><small>${e.message} · uptime ${e.uptime_s}s</small></div>`}).join(''):'<div class="small">Событий пока нет.</div>';}catch(e){}\n}\n'''
+              s=s.replace(needle,block+needle,1)
+          # Status rendering in current UI is compact and may differ in indentation.
+          if 'renderAlerts(x); eventsLoad(force);' not in s:
+              pos=s.find("$('tele').innerHTML=teleDefs.map")
+              if pos<0: raise SystemExit('status telemetry rendering anchor missing')
+              end=s.find('\n',pos)
+              if end<0: raise SystemExit('status telemetry rendering line end missing')
+              s=s[:end+1]+'  renderAlerts(x); eventsLoad(force);\n'+s[end+1:]
+          startup='setTimeout(()=>otaVersionLoad(),950);\n'
+          if 'setTimeout(()=>eventsLoad(true),1150);' not in s:
+              if startup not in s: raise SystemExit('startup anchor missing')
+              s=s.replace(startup,startup+'setTimeout(()=>eventsLoad(true),1150);\n',1)
+          route='  web.on("/api/status", HTTP_GET, sendJsonStatus);\n'
+          if 'web.on("/api/events", HTTP_GET, handleEvents);' not in s:
+              if route not in s: raise SystemExit('status route anchor missing')
+              s=s.replace(route,route+'  web.on("/api/events", HTTP_GET, handleEvents);\n',1)
+          p.write_text(s,encoding='utf-8')
+          PY
+
+      - name: Inspect generated markers
+        continue-on-error: true
+        run: |
+          grep -F 'FW_VERSION = "0.15.0"' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino || true
+          grep -F 'readHolding(100, 10, d' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino || true
+          grep -F '/api/events' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino | head || true
+          grep -F 'Состояние / аварии' firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino || true
+
+      - name: Upload ready INO
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ANENJI_ESP32_Controller_v0.15.0
+          path: firmware/ANENJI_ESP32_Controller/ANENJI_ESP32_Controller.ino
+          if-no-files-found: error
